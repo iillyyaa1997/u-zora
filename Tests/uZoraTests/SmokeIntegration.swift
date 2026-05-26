@@ -66,7 +66,57 @@ struct SmokeIntegration {
         let registry = await ProbeRegistry.defaultPopulated()
         await registry.start()
         let names = await registry.registeredNames()
-        #expect(names.count == 6)
+        #expect(names.count == 10)
         await registry.stop()
+    }
+
+    // MARK: - Phase 3 process-based probes — live smoke
+
+    @Test func processSampler_live_doesNotCrash() async throws {
+        // listAllPIDs ought to return *something* on every running Mac.
+        let pids = ProcessSampler.listAllPIDs()
+        #expect(!pids.isEmpty)
+        // hostTotalMemoryBytes returns 0 only when sysctl misbehaves.
+        let mem = ProcessSampler.hostTotalMemoryBytes()
+        #expect(mem > 0)
+    }
+
+    @Test func kernelTask_live_baselineCall() async throws {
+        let probe = KernelTaskProbe()
+        // First call primes the prior snapshot; should not throw and
+        // should not emit (no delta available yet).
+        let alerts = try await probe.run()
+        #expect(alerts.isEmpty)
+    }
+
+    @Test func topCPU_live_doesNotCrash() async throws {
+        let probe = TopCPUProcessProbe()
+        _ = try await probe.run()
+    }
+
+    @Test func topMem_live_emitsShapeOrEmpty() async throws {
+        let probe = TopMemoryProcessProbe()
+        let alerts = try await probe.run()
+        // Either no alert (top process under 8 GB) or 1 alert keyed on top
+        // process. Never more.
+        #expect(alerts.count <= 1)
+        if let alert = alerts.first {
+            #expect(alert.probe == "top_mem")
+            #expect(alert.details?["host_total_mb"] != nil)
+        }
+    }
+
+    @Test func topNet_live_unavailableOrEmpty() async throws {
+        // nettop may take ~1 s; test should still succeed in <5s.
+        let probe = TopNetworkProcessProbe()
+        let alerts = try await probe.run()
+        // Either empty (no traffic / nettop unparsable) or one alert.
+        #expect(alerts.count <= 1)
+    }
+
+    @Test func powerProfileMonitor_live_currentReturnsState() async {
+        let monitor = PowerProfileMonitor()
+        let profile = await monitor.current()
+        #expect(PowerState.allCases.contains(profile.state))
     }
 }

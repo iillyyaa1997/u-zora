@@ -1,13 +1,67 @@
 import Foundation
 
 /// Events derived from diffing consecutive alert sets.
-public enum WatchdogEvent: Sendable, Equatable {
+public enum WatchdogEvent: Sendable, Equatable, Codable {
     /// Alert appeared (was not present previously).
     case appeared(Alert)
     /// Alert remained firing but severity rose.
     case escalated(Alert, previousSeverity: Severity)
     /// Alert is no longer firing.
     case cleared(Alert.ID)
+
+    // MARK: - Codable
+    //
+    // Single-tag JSON layout shared across the four bridge channels
+    // (JSONL line / REST response / SSE frame / MCP tool result):
+    //
+    //   {"kind":"appeared","alert":{...}}
+    //   {"kind":"escalated","alert":{...},"previous_severity":"warn"}
+    //   {"kind":"cleared","alert_id":"disk:/"}
+    //
+    // Tag = `kind`. Payload keys are `alert`, `previous_severity`,
+    // `alert_id` — matching DESIGN §3 channel-schema parity language.
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case alert
+        case previousSeverity = "previous_severity"
+        case alertID = "alert_id"
+    }
+
+    private enum Kind: String, Codable {
+        case appeared, escalated, cleared
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .appeared(let alert):
+            try c.encode(Kind.appeared, forKey: .kind)
+            try c.encode(alert, forKey: .alert)
+        case .escalated(let alert, let prev):
+            try c.encode(Kind.escalated, forKey: .kind)
+            try c.encode(alert, forKey: .alert)
+            try c.encode(prev, forKey: .previousSeverity)
+        case .cleared(let id):
+            try c.encode(Kind.cleared, forKey: .kind)
+            try c.encode(id, forKey: .alertID)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        switch kind {
+        case .appeared:
+            self = .appeared(try c.decode(Alert.self, forKey: .alert))
+        case .escalated:
+            let alert = try c.decode(Alert.self, forKey: .alert)
+            let prev = try c.decode(Severity.self, forKey: .previousSeverity)
+            self = .escalated(alert, previousSeverity: prev)
+        case .cleared:
+            self = .cleared(try c.decode(String.self, forKey: .alertID))
+        }
+    }
 }
 
 /// Diffs consecutive `Alert` sets and emits `WatchdogEvent`s.

@@ -1,0 +1,78 @@
+# uZora configuration — TOML
+#
+# This file is auto-generated on first launch at
+#   ~/Library/Application Support/uZora/config.toml
+# Edit and save — uZora hot-reloads the changes within ~150ms.
+
+[general]
+# Register the app as a login item via SMAppService.
+start_at_login = false
+# UI language: "system", "en", "ru"
+language = "system"
+# Appearance: "system", "light", "dark"
+theme = "system"
+# JSONL event-log retention in days.
+log_retention_days = 30
+
+[http]
+# Bridge HTTP server on 127.0.0.1.
+enabled = true
+port = 39842
+
+[mcp]
+# Toggle MCP without disabling the rest of the HTTP bridge.
+enabled = true
+
+[notifications]
+# Banner severity floor: "info", "warn", "critical".
+banner_severity_floor = "warn"
+# Suppress warn banners while Focus is active (critical always pierces).
+respect_focus = true
+
+# Per-probe overrides. Each section accepts:
+#   enabled            (bool, default true)
+#   warn_threshold     (float, probe-specific units)
+#   critical_threshold (float, probe-specific units)
+#   poll_interval_sec  (int, override default cadence)
+
+[probes.disk]
+enabled = true
+
+[probes.cpu_temp]
+enabled = true
+
+[probes.thermal]
+enabled = true
+
+[probes.battery]
+enabled = true
+
+[probes.smart]
+enabled = true
+
+[probes.fan]
+enabled = true
+
+[probes.kernel_task]
+enabled = true
+
+[probes.top_cpu]
+enabled = true
+
+[probes.top_mem]
+enabled = true
+
+[probes.top_net]
+enabled = true
+
+# Per power-state overrides. Empty sections take the built-in defaults
+# (see Core/PowerProfile.swift `defaultMapping`).
+[power_profiles.ac_open]
+
+[power_profiles.ac_closed]
+
+[power_profiles.battery_open]
+
+[power_profiles.battery_closed]
+
+[power_profiles.focus]

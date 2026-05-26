@@ -15,6 +15,9 @@ let package = Package(
             name: "uZora",
             path: "Sources/uZora",
             exclude: ["Support/Info.plist"],
+            resources: [
+                .process("Resources"),
+            ],
             linkerSettings: [
                 // Embed Info.plist directly into the Mach-O __TEXT,__info_plist
                 // section so the executable is treated as an LSUIElement

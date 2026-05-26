@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 import os
 
 @main
@@ -8,90 +9,136 @@ struct uZoraApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContents(state: appDelegate.uiState)
-        } label: {
-            Image(systemName: "sunrise.fill")
-        }
-
-        Settings {
-            EmptyView()
-        }
-    }
-}
-
-/// SwiftUI view bound to `AppDelegate.uiState`. Hosts the menu-bar
-/// dropdown rows.
-private struct MenuContents: View {
-    @ObservedObject var state: UIState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("uZora — Phase 4 build")
-                .font(.headline)
-            Text("Power: \(state.powerStateLabel)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(state.bridgeLabel)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if state.probeNames.isEmpty {
-                Text("Probes loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            // Live dashboard popover. Replaces the placeholder Phase 4 menu.
+            if let bindings = appDelegate.bindings {
+                PopoverView(state: appDelegate.uiState)
+                    .environmentObject(bindings)
             } else {
-                Text("Probes: \(state.probeNames.joined(separator: ", "))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: 320, alignment: .leading)
+                ProgressView()
+                    .frame(width: 200, height: 100)
             }
-            Divider()
-            if state.recentEventTexts.isEmpty {
-                Text("No watchdog events yet")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            } else {
-                Text("Recent events:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ForEach(state.recentEventTexts, id: \.self) { row in
-                    Text(row)
+        } label: {
+            // Tint the icon by overall severity so a glance at the menu
+            // bar communicates "all clear / warn / critical".
+            HStack(spacing: 4) {
+                Image(systemName: "sunrise.fill")
+                    .foregroundStyle(appDelegate.uiState.overallSeverityTint)
+                if appDelegate.uiState.overallSeverity == .critical {
+                    Text("!")
                         .font(.caption2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 320, alignment: .leading)
+                        .foregroundStyle(.red)
                 }
             }
-            Divider()
-            Button("Quit uZora") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q", modifiers: .command)
         }
-        .padding(8)
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            if let bindings = appDelegate.bindings {
+                SettingsView(bindings: bindings, state: appDelegate.uiState)
+            } else {
+                ProgressView()
+            }
+        }
     }
 }
 
-/// Observable UI state. Lives on the AppDelegate so it survives view
-/// recomposition and so the bootstrap can run at `applicationDidFinishLaunching`
-/// regardless of whether the menu has been opened.
+/// SwiftUI-observable mirror of the running probe + channel pipeline.
 @MainActor
 public final class UIState: ObservableObject {
+    // Probe inventory + last event log mirror (legacy Phase 4 fields).
     @Published public var probeNames: [String] = []
     @Published public var recentEventTexts: [String] = []
     @Published public var powerStateLabel: String = "—"
     @Published public var bridgeLabel: String = "bridge starting…"
+
+    // Phase 5 dashboard fields.
+    @Published public var activeAlerts: [Alert] = []
+    @Published public var overallSeverity: Severity? = nil
+    @Published public var startedAt: Date = Date()
+
+    /// Process top-5 / top-3 lists for the popover.
+    public struct ProcessSnap: Sendable, Equatable {
+        public let pid: Int32
+        public let name: String
+        public let cpuPct: Double
+        public let rssBytes: UInt64
+    }
+    @Published public var topCPUProcesses: [ProcessSnap] = []
+    @Published public var topMemProcesses: [ProcessSnap] = []
+
+    // Mini-tile current labels.
+    @Published public var cpuTempLabel: String = "—"
+    @Published public var diskFreeLabel: String = "—"
+    @Published public var batteryLabel: String = "—"
+    @Published public var memoryLabel: String = "—"
+
+    // Ring buffers for sparklines (last 60 samples).
+    @Published public var cpuTempHistory: [Double] = []
+    @Published public var diskFreeHistory: [Double] = []
+    @Published public var batteryHistory: [Double] = []
+    @Published public var memoryHistory: [Double] = []
+
+    // Channel up-state indicators.
+    @Published public var httpAlive: Bool = false
+    @Published public var mcpAlive: Bool = false
+    @Published public var jsonlAlive: Bool = false
+
+    public var uptimeLabel: String {
+        let elapsed = Int(Date().timeIntervalSince(startedAt))
+        if elapsed < 60 { return "uptime \(elapsed)s" }
+        let mins = elapsed / 60
+        if mins < 60 { return "uptime \(mins)m" }
+        let hours = mins / 60
+        return "uptime \(hours)h"
+    }
+
+    public var overallSeverityTint: Color {
+        switch overallSeverity {
+        case .some(.critical): return .red
+        case .some(.warn):     return .yellow
+        case .some(.info):     return .blue
+        case .none:            return .gray
+        }
+    }
+
+    /// Push the latest snapshot from the StateStore + samplers into the
+    /// observable fields used by the popover.
+    public func apply(activeAlerts: [Alert]) {
+        self.activeAlerts = activeAlerts.sorted { $0.severity > $1.severity }
+        self.overallSeverity = activeAlerts.max(by: { $0.severity < $1.severity })?.severity
+    }
+
+    /// Append a metric data point to a sparkline buffer (60-sample cap).
+    public func recordMetric(probe: String, value: Double) {
+        switch probe {
+        case "cpu_temp":
+            cpuTempHistory.append(value)
+            if cpuTempHistory.count > 60 { cpuTempHistory.removeFirst(cpuTempHistory.count - 60) }
+            cpuTempLabel = String(format: "%.0f°C", value)
+        case "disk":
+            diskFreeHistory.append(value)
+            if diskFreeHistory.count > 60 { diskFreeHistory.removeFirst(diskFreeHistory.count - 60) }
+            diskFreeLabel = String(format: "%.0f%%", value)
+        case "battery":
+            batteryHistory.append(value)
+            if batteryHistory.count > 60 { batteryHistory.removeFirst(batteryHistory.count - 60) }
+            batteryLabel = String(format: "%.0f%%", value)
+        case "memory":
+            memoryHistory.append(value)
+            if memoryHistory.count > 60 { memoryHistory.removeFirst(memoryHistory.count - 60) }
+            memoryLabel = String(format: "%.0f%%", value)
+        default:
+            break
+        }
+    }
 }
 
-/// AppDelegate driving the Phase 1+ probe pipeline and Phase 4 channels.
-/// Bootstrap runs at `applicationDidFinishLaunching` so the HTTP server
-/// is bound regardless of whether the user clicks the menu bar icon.
+/// AppDelegate driving the Phase 1+5 pipeline.
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     public let uiState: UIState
+    @Published public var bindings: ConfigBindings?
 
     public override init() {
         self.uiState = UIState()
@@ -102,6 +149,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var host: ChannelHost?
     private var registry: ProbeRegistry?
     private var bus: EventBus?
+    private var loader: ConfigLoader?
+    private var notifications: UZoraNotificationCenter?
+    private var stateStore: StateStore?
+    private var refreshTimer: Timer?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -111,6 +162,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func bootstrap() async {
+        // Phase 5: load config first so HTTP port / probe enables apply.
+        let loader: ConfigLoader
+        do {
+            loader = try ConfigLoader()
+            await loader.startWatching()
+        } catch {
+            log.error("config init failed: \(String(describing: error), privacy: .public); using defaults")
+            // Fall back to an in-memory default; UI still works.
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("uzora-fallback-\(UUID().uuidString).toml")
+            loader = (try? ConfigLoader(configURL: tmp)) ?? {
+                // Last-resort: a loader with a synthetic URL we'll never use.
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("uzora-noop.toml")
+                return try! ConfigLoader(configURL: url)
+            }()
+        }
+        self.loader = loader
+        let initial = await loader.current
+        let bindings = ConfigBindings(loader: loader, initial: initial)
+        self.bindings = bindings
+
+        // Subscribe to config reload broadcasts.
+        await loader.observe { [weak bindings] config in
+            Task { @MainActor [weak bindings] in
+                bindings?.sync(config)
+            }
+        }
+
         let registry = await ProbeRegistry.defaultPopulated()
         let powerMonitor = PowerProfileMonitor()
         let watchdog = Watchdog()
@@ -118,14 +196,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let stateStore = StateStore()
         self.registry = registry
         self.bus = eventBus
+        self.stateStore = stateStore
 
         let jsonlSink: JSONLEventSink?
         do {
-            jsonlSink = try JSONLEventSink()
+            jsonlSink = try JSONLEventSink(retentionDays: initial.general.logRetentionDays)
+            uiState.jsonlAlive = true
         } catch {
             log.error("JSONLEventSink init failed: \(String(describing: error), privacy: .public)")
             jsonlSink = nil
+            uiState.jsonlAlive = false
         }
+
+        // Phase 5: notification center + auth.
+        let notifs = UZoraNotificationCenter()
+        await notifs.requestAuthorization()
+        self.notifications = notifs
 
         // Seed the probe inventory in the state store.
         let names = await registry.registeredNames()
@@ -135,10 +221,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         await stateStore.setProbes(inventory)
         uiState.probeNames = names
 
-        // EventBus → logger + console + UI mirror.
+        // EventBus → built-in sinks.
         await eventBus.attachLoggerSink()
         await eventBus.attachConsoleSink()
 
+        // UI mirror of last events (legacy).
         let weakState = uiState
         await eventBus.subscribe { [weak weakState] event in
             let text = AppDelegate.format(event)
@@ -151,20 +238,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Bring up the four-channel bridge.
+        // Phase 5: bridge events → user notifications + active-alerts mirror.
+        let notifsRef = notifs
+        let bindingsRef = bindings
+        let storeRef = stateStore
+        await eventBus.subscribe { [weak weakState] event in
+            Task { @MainActor [weak weakState] in
+                guard let weakState else { return }
+                let active = await storeRef.activeAlerts()
+                weakState.apply(activeAlerts: active)
+                let focusActive = false // Reserved for Phase 6 Focus detection.
+                _ = await notifsRef.notify(
+                    event: event,
+                    config: bindingsRef.current.notifications,
+                    focusActive: focusActive
+                )
+            }
+        }
+
+        // Bring up the four-channel bridge respecting HTTP/MCP enablement.
+        let portConfig = initial.http.port
         let portEnv = ProcessInfo.processInfo.environment["UZORA_HTTP_PORT"].flatMap { UInt16($0) }
-        let port = portEnv ?? 39842
-        if let jsonlSink {
+        let port = portEnv ?? portConfig
+        if let jsonlSink, initial.http.enabled {
             let host = ChannelHost(port: port, state: stateStore, jsonl: jsonlSink, eventBus: eventBus)
             do {
                 try await host.start()
                 let bound = await host.boundPort()
                 uiState.bridgeLabel = "bridge: http://127.0.0.1:\(bound)"
+                uiState.httpAlive = true
+                uiState.mcpAlive = initial.mcp.enabled
                 self.host = host
             } catch {
                 uiState.bridgeLabel = "bridge: failed (\(error))"
+                uiState.httpAlive = false
                 log.error("ChannelHost start failed: \(String(describing: error), privacy: .public)")
             }
+        } else {
+            uiState.bridgeLabel = "bridge: disabled"
         }
 
         // PowerMonitor → registry + state-store + UI label.
@@ -182,14 +293,92 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         await registry.start(watchdog: watchdog, eventBus: eventBus)
         log.info("uZora launched, registered \(names.count, privacy: .public) probes, bridge on :\(port, privacy: .public)")
+
+        // Drive a 5s refresh loop that pulls metric sparklines + process
+        // top-N from the live samplers. Phase 5 stops short of SQLite —
+        // these are session-local ring buffers.
+        startMetricRefresh()
+    }
+
+    /// Sample probes every 5s for popover-visible metrics (sparklines + top
+    /// processes). The actual probe scheduler runs at probe cadence and
+    /// drives alerts; this loop is purely visual.
+    @MainActor
+    private func startMetricRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.refreshMetricsAndProcesses()
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshMetricsAndProcesses() async {
+        // CPU temp.
+        if let s = CPUTempProbe.sampleViaSMC() {
+            uiState.recordMetric(probe: "cpu_temp", value: s.tempC)
+        }
+        // Disk free.
+        if let s = DiskFreeProbe.sampleRoot() {
+            uiState.recordMetric(probe: "disk", value: s.freeFraction * 100)
+        }
+        // Battery (laptops only).
+        if let s = BatteryProbe.sampleInternalBattery() {
+            uiState.recordMetric(probe: "battery", value: Double(s.chargePct))
+        }
+        // Memory pressure: rough — used / total %.
+        let totalBytes = ProcessSampler.hostTotalMemoryBytes()
+        if totalBytes > 0 {
+            let snaps = ProcessSampler.snapshotAll()
+            let totalRSS = snaps.reduce(UInt64(0)) { $0 + $1.residentSizeBytes }
+            let pct = Double(totalRSS) / Double(totalBytes) * 100
+            uiState.recordMetric(probe: "memory", value: min(pct, 100))
+        }
+        // Top processes.
+        let snaps = ProcessSampler.snapshotAll()
+        let byMem = snaps
+            .sorted { $0.residentSizeBytes > $1.residentSizeBytes }
+            .prefix(3)
+            .map {
+                UIState.ProcessSnap(
+                    pid: $0.pid,
+                    name: $0.name,
+                    cpuPct: 0,
+                    rssBytes: $0.residentSizeBytes
+                )
+            }
+        uiState.topMemProcesses = Array(byMem)
+        // Top CPU is best computed off the live TopCPUProcessProbe state;
+        // for the dashboard we approximate from the alerts (kernel_task /
+        // top_cpu give visible CPU%). Build a name+pct list from the
+        // current active alerts of probe == top_cpu.
+        let cpuFromAlerts = uiState.activeAlerts
+            .filter { $0.probe == "top_cpu" }
+            .compactMap { alert -> UIState.ProcessSnap? in
+                guard let pidStr = alert.details?["pid"], let pid = Int32(pidStr) else { return nil }
+                let cmd = alert.details?["command"] ?? alert.key
+                let pct = Double(alert.details?["cpu_pct"] ?? "0") ?? 0
+                return UIState.ProcessSnap(pid: pid, name: cmd, cpuPct: pct, rssBytes: 0)
+            }
+        if !cpuFromAlerts.isEmpty {
+            uiState.topCPUProcesses = cpuFromAlerts
+        } else if uiState.topCPUProcesses.isEmpty {
+            // Fallback: show the largest RSS processes (so the section
+            // never looks empty on a quiet machine).
+            uiState.topCPUProcesses = uiState.topMemProcesses
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
         let h = self.host
         let r = self.registry
+        let l = self.loader
         Task {
             await h?.stop()
             await r?.stop()
+            await l?.stopWatching()
         }
     }
 

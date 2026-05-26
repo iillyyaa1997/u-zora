@@ -75,6 +75,14 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
         self.clock = clock
     }
 
+    public var defaultMetricKey: String { "package" }
+
+    /// Phase 6: latest CPU package temperature, for sparkline history.
+    public func currentMetrics() async -> [String: Double] {
+        guard let s = sampler() else { return [:] }
+        return ["temp_c": s.tempC]
+    }
+
     public func run() async throws -> [Alert] {
         guard let sample = sampler() else {
             if !unavailableLogged {

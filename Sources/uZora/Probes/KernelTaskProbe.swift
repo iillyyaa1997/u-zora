@@ -56,6 +56,11 @@ public final class KernelTaskProbe: Probe, @unchecked Sendable {
     private var firstSeenAt: Date?
     private var unavailableLogged = false
 
+    /// Latest computed kernel_task CPU% — populated as a side effect of
+    /// `run()`. Read by `currentMetrics()` for the Phase 6 graph history.
+    /// `nil` until the second successful poll (we need a delta).
+    private var lastCpuPct: Double?
+
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "kernel_task")
 
     public convenience init(thresholds: Thresholds = .default) {
@@ -80,6 +85,17 @@ public final class KernelTaskProbe: Probe, @unchecked Sendable {
         self.clock = clock
         self.pidFinder = pidFinder
         self.snapshotter = snapshotter
+    }
+
+    public var defaultMetricKey: String { "kernel_task" }
+
+    /// Phase 6: latest kernel_task CPU%. Emits the most recently observed
+    /// value (set as a side effect of `run()` after the first delta is
+    /// available). Returns empty until then, which the store treats as
+    /// "skip this poll".
+    public func currentMetrics() async -> [String: Double] {
+        guard let v = lastCpuPct else { return [:] }
+        return ["cpu_pct": v]
     }
 
     public func run() async throws -> [Alert] {
@@ -109,6 +125,9 @@ public final class KernelTaskProbe: Probe, @unchecked Sendable {
         guard let cpuPct = ProcessSampler.cpuPercent(previous: prior, current: current) else {
             return []
         }
+        // Stash latest computed cpu% so `currentMetrics()` can emit it
+        // even when the threshold ladder hasn't fired.
+        self.lastCpuPct = cpuPct
 
         let decision = Self.evaluate(
             cpuPct: cpuPct,

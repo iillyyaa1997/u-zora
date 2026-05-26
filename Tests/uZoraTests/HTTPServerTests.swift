@@ -109,7 +109,10 @@ struct HTTPServerTests {
         await server.stop()
     }
 
-    @Test func metrics_returnsStub() async throws {
+    @Test func metrics_returnsEmptyShape_whenNoStoreWired() async throws {
+        // Phase 6: when no MetricsStore is attached to RESTHandlers the
+        // endpoint still answers but returns an explanatory note + empty
+        // samples array.
         let store = StateStore()
         let (port, server) = try await boot(state: store)
         defer { Task { await server.stop() } }
@@ -117,8 +120,64 @@ struct HTTPServerTests {
         let (code, data) = try await get(url)
         #expect(code == 200)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        #expect((json?["note"] as? String)?.contains("Phase 5") == true)
         #expect(json?["probe"] as? String == "disk")
+        #expect((json?["samples"] as? [Any])?.isEmpty == true)
+        #expect(json?["count"] as? Int == 0)
+        #expect((json?["note"] as? String)?.contains("not wired") == true)
+        await server.stop()
+    }
+
+    @Test func metrics_returnsBadRequest_whenProbeMissing() async throws {
+        let store = StateStore()
+        let (port, server) = try await boot(state: store)
+        defer { Task { await server.stop() } }
+        let url = URL(string: "http://127.0.0.1:\(port)/metrics")!
+        let (code, _) = try await get(url)
+        #expect(code == 400)
+        await server.stop()
+    }
+
+    @Test func metrics_returnsRows_whenStoreHasData() async throws {
+        // Boot a server with a real (in-memory) MetricsStore, write a
+        // few samples, fetch via REST, assert payload shape.
+        let stateStore = StateStore()
+        let metricsStore = try MetricsStore(inMemory: true)
+        defer { Task { await metricsStore.close() } }
+
+        // Insert samples slightly in the past so the default
+        // "last hour" window (from = now - 3600, to = now) catches them.
+        let now = Date()
+        try await metricsStore.recordSample(probe: "disk", key: "/", name: "free_pct", value: 71.0, at: now.addingTimeInterval(-120))
+        try await metricsStore.recordSample(probe: "disk", key: "/", name: "free_pct", value: 71.5, at: now.addingTimeInterval(-60))
+        try await metricsStore.recordSample(probe: "cpu_temp", key: "package", name: "temp_c", value: 55.0, at: now.addingTimeInterval(-30))
+
+        let server = HTTPServer(port: 0)
+        let rest = RESTHandlers(state: stateStore, metricsStore: metricsStore)
+        await server.register(method: "GET", path: "/metrics") { req in
+            let probe = req.query["probe"]
+            let name = req.query["name"]
+            let from = req.query["from"].flatMap { RESTHandlers.parseISO8601($0) }
+            let to = req.query["to"].flatMap { RESTHandlers.parseISO8601($0) }
+            return await rest.metrics(probe: probe, name: name, from: from, to: to)
+        }
+        try await server.start()
+        let port = await server.boundPort
+        defer { Task { await server.stop() } }
+
+        let url = URL(string: "http://127.0.0.1:\(port)/metrics?probe=disk")!
+        let (code, data) = try await get(url)
+        #expect(code == 200)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let samples = json?["samples"] as? [[String: Any]] ?? []
+        #expect(samples.count == 2)
+        #expect(json?["count"] as? Int == 2)
+        // Filter by metric name.
+        let filtered = URL(string: "http://127.0.0.1:\(port)/metrics?probe=cpu_temp&name=temp_c")!
+        let (code2, data2) = try await get(filtered)
+        #expect(code2 == 200)
+        let json2 = try JSONSerialization.jsonObject(with: data2) as? [String: Any]
+        let samples2 = json2?["samples"] as? [[String: Any]] ?? []
+        #expect(samples2.count == 1)
         await server.stop()
     }
 

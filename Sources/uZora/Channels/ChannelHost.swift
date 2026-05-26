@@ -15,6 +15,7 @@ public actor ChannelHost {
     public let port: UInt16
     public let state: StateStore
     public let jsonl: JSONLEventSink
+    public let metrics: MetricsStore?
     public let httpServer: HTTPServer
     public let rest: RESTHandlers
     public let sse: SSEStream
@@ -30,15 +31,17 @@ public actor ChannelHost {
         port: UInt16,
         state: StateStore,
         jsonl: JSONLEventSink,
-        eventBus: EventBus
+        eventBus: EventBus,
+        metrics: MetricsStore? = nil
     ) {
         self.port = port
         self.state = state
         self.jsonl = jsonl
+        self.metrics = metrics
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
-        let rest = RESTHandlers(state: state)
+        let rest = RESTHandlers(state: state, metricsStore: metrics)
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus)
         self.mcp = MCPServer(tools: MCPTools(
@@ -107,9 +110,10 @@ public actor ChannelHost {
         }
         await httpServer.register(method: "GET", path: "/metrics") { req in
             let probe = req.query["probe"]
+            let name = req.query["name"]
             let from = req.query["from"].flatMap { RESTHandlers.parseISO8601($0) }
             let to = req.query["to"].flatMap { RESTHandlers.parseISO8601($0) }
-            return await rest.metrics(probe: probe, from: from, to: to)
+            return await rest.metrics(probe: probe, name: name, from: from, to: to)
         }
         await httpServer.register(method: "POST", path: "/mcp") { req in
             await mcp.handle(req)

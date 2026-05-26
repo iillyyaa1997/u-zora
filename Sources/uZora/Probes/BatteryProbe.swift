@@ -89,6 +89,22 @@ public final class BatteryProbe: Probe, @unchecked Sendable {
         self.clock = clock
     }
 
+    public var defaultMetricKey: String { "internal" }
+
+    /// Phase 6: latest battery readings. Wattage values are optional —
+    /// the dictionary only contains keys the IOPS dictionary actually
+    /// supplied this poll.
+    public func currentMetrics() async -> [String: Double] {
+        guard let s = sampler() else { return [:] }
+        var out: [String: Double] = [
+            "charge_pct": Double(s.chargePct),
+        ]
+        if let cycles = s.cycles { out["cycles"] = Double(cycles) }
+        if let w = s.wattageIn { out["wattage_in"] = w }
+        if let w = s.wattageOut { out["wattage_out"] = w }
+        return out
+    }
+
     public func run() async throws -> [Alert] {
         guard let sample = sampler() else {
             // No internal battery — Mac mini / Studio / Pro / iMac all hit

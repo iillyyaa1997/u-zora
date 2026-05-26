@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: build + test
+    # NOTE: `macos-26-arm` is preferred when GitHub-Actions ships a 26
+    # Tahoe Apple-Silicon runner. Until then we ride `macos-latest` and
+    # accept that `LSMinimumSystemVersion = 26.0` may not match the
+    # runner's OS — the build still compiles because Swift 6 + the
+    # macOS 26 SDK are toolchain-driven, not runner-OS-driven. Tests
+    # that touch live IOKit / SMC will degrade-to-no-op rather than
+    # fail on a `macos-14` runner.
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift toolchain
+        run: |
+          swift --version
+          xcrun --show-sdk-version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Build (debug, for tests)
+        run: swift build
+
+      - name: Test
+        run: swift test --parallel
+
+      - name: Verify Info.plist LSMinimumSystemVersion
+        run: |
+          plutil -extract LSMinimumSystemVersion raw Sources/uZora/Support/Info.plist \
+            | tee /tmp/min-os-version
+          test "$(cat /tmp/min-os-version)" = "26.0"

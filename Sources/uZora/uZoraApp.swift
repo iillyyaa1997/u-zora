@@ -152,7 +152,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var loader: ConfigLoader?
     private var notifications: UZoraNotificationCenter?
     private var stateStore: StateStore?
+    private var metricsStore: MetricsStore?
     private var refreshTimer: Timer?
+    private var metricsRetentionTask: Task<Void, Never>?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -197,6 +199,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         self.registry = registry
         self.bus = eventBus
         self.stateStore = stateStore
+
+        // Phase 6: open the SQLite metrics store and start a daily purge
+        // loop. Failure to open downgrades the app to "no historical
+        // metrics" — REST /metrics still answers, just with empty arrays.
+        let metricsStore: MetricsStore?
+        do {
+            metricsStore = try MetricsStore()
+        } catch {
+            log.error("MetricsStore init failed: \(String(describing: error), privacy: .public); continuing without history")
+            metricsStore = nil
+        }
+        self.metricsStore = metricsStore
+        if let metricsStore {
+            await registry.attachMetricsStore(metricsStore)
+            startMetricsRetentionLoop(store: metricsStore)
+        }
 
         let jsonlSink: JSONLEventSink?
         do {
@@ -261,7 +279,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let portEnv = ProcessInfo.processInfo.environment["UZORA_HTTP_PORT"].flatMap { UInt16($0) }
         let port = portEnv ?? portConfig
         if let jsonlSink, initial.http.enabled {
-            let host = ChannelHost(port: port, state: stateStore, jsonl: jsonlSink, eventBus: eventBus)
+            let host = ChannelHost(
+                port: port,
+                state: stateStore,
+                jsonl: jsonlSink,
+                eventBus: eventBus,
+                metrics: metricsStore
+            )
             do {
                 try await host.start()
                 let bound = await host.boundPort()
@@ -303,6 +327,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     /// Sample probes every 5s for popover-visible metrics (sparklines + top
     /// processes). The actual probe scheduler runs at probe cadence and
     /// drives alerts; this loop is purely visual.
+    ///
+    /// Phase 6: when a `MetricsStore` is wired, the sparkline buffers are
+    /// rebuilt from the last 60 s of persisted samples each tick so the
+    /// graph survives session restarts (instead of starting blank). The
+    /// live samplers still run as a backup so the very first popover
+    /// open also paints data on a brand-new install.
     @MainActor
     private func startMetricRefresh() {
         refreshTimer?.invalidate()
@@ -314,8 +344,39 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         }
     }
 
+    /// Phase 6: hydrate the popover sparkline buffers from the metrics
+    /// store. Falls back silently when the store isn't available.
+    @MainActor
+    private func rehydrateSparklinesFromStore() async {
+        guard let store = self.metricsStore else { return }
+        let now = Date()
+        let fromTs = now.addingTimeInterval(-300) // last 5 min
+
+        let cpuSamples = (try? await store.query(probe: "cpu_temp", from: fromTs, to: now, name: "temp_c")) ?? []
+        if !cpuSamples.isEmpty {
+            uiState.cpuTempHistory = cpuSamples.suffix(60).map { $0.value }
+            if let last = cpuSamples.last { uiState.cpuTempLabel = String(format: "%.0f°C", last.value) }
+        }
+
+        let diskSamples = (try? await store.query(probe: "disk", from: fromTs, to: now, name: "free_pct")) ?? []
+        if !diskSamples.isEmpty {
+            uiState.diskFreeHistory = diskSamples.suffix(60).map { $0.value }
+            if let last = diskSamples.last { uiState.diskFreeLabel = String(format: "%.0f%%", last.value) }
+        }
+
+        let battSamples = (try? await store.query(probe: "battery", from: fromTs, to: now, name: "charge_pct")) ?? []
+        if !battSamples.isEmpty {
+            uiState.batteryHistory = battSamples.suffix(60).map { $0.value }
+            if let last = battSamples.last { uiState.batteryLabel = String(format: "%.0f%%", last.value) }
+        }
+    }
+
     @MainActor
     private func refreshMetricsAndProcesses() async {
+        // Phase 6: prefer persisted history (survives restart) and fall
+        // back to live samplers below so day-zero charts still paint.
+        await rehydrateSparklinesFromStore()
+
         // CPU temp.
         if let s = CPUTempProbe.sampleViaSMC() {
             uiState.recordMetric(probe: "cpu_temp", value: s.tempC)
@@ -371,14 +432,50 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         }
     }
 
+    /// Phase 6: prune metric rows older than 7 days every 24 h. Runs in
+    /// a detached `Task` so it survives app-lifetime; cancelled on
+    /// terminate.
+    @MainActor
+    private func startMetricsRetentionLoop(store: MetricsStore) {
+        metricsRetentionTask?.cancel()
+        metricsRetentionTask = Task.detached(priority: .background) { [weak self] in
+            // Run one purge eagerly at startup, then once a day.
+            while !Task.isCancelled {
+                let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
+                do {
+                    let removed = try await store.purge(olderThan: cutoff)
+                    if removed > 0 {
+                        await self?.logMetricsPurge(removed: removed)
+                    }
+                } catch {
+                    await self?.logMetricsPurgeError(error)
+                }
+                try? await Task.sleep(for: .seconds(24 * 3600))
+            }
+        }
+    }
+
+    @MainActor
+    private func logMetricsPurge(removed: Int) {
+        log.info("metrics retention: purged \(removed, privacy: .public) rows older than 7d")
+    }
+
+    @MainActor
+    private func logMetricsPurgeError(_ error: Swift.Error) {
+        log.error("metrics retention failed: \(String(describing: error), privacy: .public)")
+    }
+
     public func applicationWillTerminate(_ notification: Notification) {
         let h = self.host
         let r = self.registry
         let l = self.loader
+        let m = self.metricsStore
+        metricsRetentionTask?.cancel()
         Task {
             await h?.stop()
             await r?.stop()
             await l?.stopWatching()
+            await m?.close()
         }
     }
 

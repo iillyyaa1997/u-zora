@@ -33,6 +33,26 @@ public final class ThermalPressureProbe: Probe, @unchecked Sendable {
         self.clock = clock
     }
 
+    public var defaultMetricKey: String { "system" }
+
+    /// Phase 6: thermal pressure as an int 0..3 so the sparkline can
+    /// render a stepped trace alongside the cpu_temp curve.
+    public func currentMetrics() async -> [String: Double] {
+        ["level_int": Double(Self.levelInt(processInfo.thermalState))]
+    }
+
+    /// Map `ProcessInfo.ThermalState` to 0..3 for the persisted metric.
+    /// 0 = nominal, 1 = fair, 2 = serious, 3 = critical.
+    public static func levelInt(_ state: ProcessInfo.ThermalState) -> Int {
+        switch state {
+        case .nominal:  return 0
+        case .fair:     return 1
+        case .serious:  return 2
+        case .critical: return 3
+        @unknown default: return 0
+        }
+    }
+
     public func run() async throws -> [Alert] {
         let state = processInfo.thermalState
         guard let severity = Self.severity(for: state) else {

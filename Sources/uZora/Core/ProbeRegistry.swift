@@ -26,6 +26,10 @@ public actor ProbeRegistry {
     private var watchdog: Watchdog?
     private var eventBus: EventBus?
 
+    /// Phase 6: optional metrics sink. When set, `runProbeOnce` flushes
+    /// `Probe.currentMetricRows()` to the store every poll.
+    private var metricsStore: MetricsStore?
+
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "registry")
 
     public init() {}
@@ -58,6 +62,13 @@ public actor ProbeRegistry {
 
     public func powerProfile() -> PowerProfile { currentProfile }
 
+    /// Attach a `MetricsStore` so each probe's `currentMetricRows()` is
+    /// persisted on every poll. Optional — without it, alerts still flow
+    /// to EventBus / channels but no historical metrics are recorded.
+    public func attachMetricsStore(_ store: MetricsStore) {
+        self.metricsStore = store
+    }
+
     /// Begin scheduled polling.
     ///
     /// Wires `watchdog` and `eventBus` if provided (Phase 3 production
@@ -66,12 +77,14 @@ public actor ProbeRegistry {
     /// Idempotent.
     public func start(
         watchdog: Watchdog? = nil,
-        eventBus: EventBus? = nil
+        eventBus: EventBus? = nil,
+        metricsStore: MetricsStore? = nil
     ) {
         guard !isRunning else { return }
         isRunning = true
         self.watchdog = watchdog
         self.eventBus = eventBus
+        if let metricsStore { self.metricsStore = metricsStore }
 
         let probeCount = probes.count
         let names = registeredNames().joined(separator: ", ")
@@ -138,8 +151,37 @@ public actor ProbeRegistry {
         do {
             let alerts = try await probe.run()
             await ingestProbeResult(name: name, alerts: alerts)
+            await harvestMetrics(name: name, probe: probe)
         } catch {
             log.error("probe \(name, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Phase 6: pull current numeric metrics from the probe and persist
+    /// them. Silent if no store is attached or the probe returns no
+    /// metrics.
+    private func harvestMetrics(name: String, probe: any Probe) async {
+        guard let store = metricsStore else { return }
+        let rows = await probe.currentMetricRows()
+        guard !rows.isEmpty else { return }
+        let now = Date()
+        var samples: [MetricsStore.Sample] = []
+        samples.reserveCapacity(rows.reduce(0) { $0 + $1.values.count })
+        for row in rows {
+            for (metricName, value) in row.values {
+                samples.append(MetricsStore.Sample(
+                    probe: name,
+                    key: row.key,
+                    name: metricName,
+                    value: value,
+                    at: now
+                ))
+            }
+        }
+        do {
+            try await store.recordSamples(samples)
+        } catch {
+            log.error("metrics persist failed for \(name, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 

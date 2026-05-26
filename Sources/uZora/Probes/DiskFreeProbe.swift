@@ -70,6 +70,19 @@ public final class DiskFreeProbe: Probe, @unchecked Sendable {
         self.clock = clock
     }
 
+    public var defaultMetricKey: String { "/" }
+
+    /// Phase 6: latest disk-free numbers. Available regardless of alert
+    /// state — the popover graph shows a flat-OK line on a healthy disk.
+    public func currentMetrics() async -> [String: Double] {
+        guard let s = sampler() else { return [:] }
+        return [
+            "free_pct":    s.freeFraction * 100.0,
+            "free_bytes":  Double(s.freeBytes),
+            "total_bytes": Double(s.totalBytes),
+        ]
+    }
+
     public func run() async throws -> [Alert] {
         guard let sample = sampler() else {
             log.error("statfs() failed; skipping disk probe sample")

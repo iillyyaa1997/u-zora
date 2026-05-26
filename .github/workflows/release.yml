@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: build .app + .dmg
+    # Same runner caveat as CI — prefer a `macos-26-arm` runner when
+    # GitHub-Actions ships one. The release artefact compiles against
+    # the macOS 26 SDK regardless of the runner's host OS version.
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          # GITHUB_REF_NAME for tag push is e.g. "v0.1.0".
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Swift toolchain
+        run: |
+          swift --version
+          xcrun --show-sdk-version
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Assemble uZora.app
+        run: |
+          set -euxo pipefail
+          APP="uZora.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+          cp .build/release/uZora "$APP/Contents/MacOS/uZora"
+          cp Sources/uZora/Support/Info.plist "$APP/Contents/Info.plist"
+          # Touch a PkgInfo file (some macOS tooling expects it).
+          printf "APPL????" > "$APP/Contents/PkgInfo"
+          # Best-effort: pull any SPM-processed resources into the
+          # bundle's Resources dir. Bundle name follows SwiftPM
+          # convention: <PackageName>_<TargetName>.bundle.
+          BUNDLE=".build/release/uZora_uZora.bundle"
+          if [ -d "$BUNDLE" ]; then
+            cp -R "$BUNDLE" "$APP/Contents/Resources/"
+          fi
+
+      - name: Ad-hoc codesign
+        run: codesign --sign - --deep --force --verbose uZora.app
+
+      - name: Verify signature
+        run: codesign -dv --verbose=4 uZora.app
+
+      - name: Package DMG
+        run: |
+          DMG="uZora-${{ steps.version.outputs.tag }}.dmg"
+          hdiutil create \
+            -volname "uZora" \
+            -srcfolder uZora.app \
+            -ov \
+            -format UDZO \
+            "$DMG"
+          ls -lh "$DMG"
+          shasum -a 256 "$DMG" > "$DMG.sha256"
+
+      - name: Upload DMG to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            "uZora-${{ steps.version.outputs.tag }}.dmg" \
+            "uZora-${{ steps.version.outputs.tag }}.dmg.sha256" \
+            || gh release upload "${{ steps.version.outputs.tag }}" \
+                 "uZora-${{ steps.version.outputs.tag }}.dmg" \
+                 "uZora-${{ steps.version.outputs.tag }}.dmg.sha256" \
+                 --clobber

@@ -149,17 +149,21 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
             guard let val = IOKitBridge.readSMCKey(key, conn: conn) else { continue }
 
             var tempC: Double?
+            // Plausibility floor 5°C: SMC firmware on Apple Silicon returns
+            // denormal floats (2.3e-11, 1.4e-18, …) for parked / un-initialised
+            // performance cores. Those are technically > 0 but physically
+            // impossible for a CPU sensor — ambient room temp is ~20-25°C.
             switch val.type {
             case "flt ":
-                if let f = val.asFloat, f.isFinite, f > 0, f < 130 {
+                if let f = val.asFloat, f.isFinite, f >= 5, f < 100 {
                     tempC = Double(f)
                 }
             case "sp78":
-                if let s = val.asSP78, s > 0, s < 130 {
+                if let s = val.asSP78, s >= 5, s < 100 {
                     tempC = s
                 }
             case "ui16", "ui8 ":
-                if let u = val.asUInt, u > 0, u < 130 {
+                if let u = val.asUInt, u >= 5, u < 100 {
                     tempC = Double(u)
                 }
             default:

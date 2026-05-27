@@ -187,12 +187,16 @@ public actor ProbeRegistry {
 
     private func ingestProbeResult(name: String, alerts: [Alert]) async {
         lastSnapshotByProbe[name] = alerts
-        // Aggregate: union over all probes' latest snapshots.
+        // Aggregate: union over all probes' latest snapshots (StateStore consumers
+        // still want the full picture).
         let aggregate = lastSnapshotByProbe.values.flatMap { $0 }
         lastAggregateSnapshot = aggregate
 
         guard let watchdog else { return }
-        let events = await watchdog.step(currentAlerts: aggregate)
+        // Per-probe diff: only this probe's slice of state changes here, so
+        // cold-start partial-aggregate ticks don't false-clear alerts from
+        // other probes that haven't run yet.
+        let events = await watchdog.step(probe: name, currentAlerts: alerts)
         guard let eventBus else { return }
 
         // Severity-floor suppression at the bus boundary.

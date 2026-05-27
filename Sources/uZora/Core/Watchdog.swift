@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Events derived from diffing consecutive alert sets.
 public enum WatchdogEvent: Sendable, Equatable, Codable {
@@ -81,12 +82,113 @@ public enum WatchdogEvent: Sendable, Equatable, Codable {
 public actor Watchdog {
 
     private var previousAlertsByID: [Alert.ID: Alert] = [:]
+    private let stateURL: URL?
+    private static let log = os.Logger(subsystem: "place.unicorns.uzora", category: "watchdog")
 
-    public init() {}
+    /// Construct a watchdog. When `stateURL` is provided, the previous
+    /// alert set is persisted there after every `step()` and reloaded on
+    /// init — making `appeared`/`cleared` events **idempotent across
+    /// process restarts** (a long-lived warn that survives a relaunch
+    /// won't re-emit `appeared`).
+    ///
+    /// Pass `nil` (the default) for tests or contexts that want a fresh,
+    /// memory-only watchdog every time.
+    public init(stateURL: URL? = nil) {
+        self.stateURL = stateURL
+        if let url = stateURL {
+            Self.loadState(from: url, into: &previousAlertsByID)
+        }
+    }
 
-    /// Compare the current alert snapshot against the prior one held in
-    /// the actor, return the resulting events, and atomically replace the
-    /// stored snapshot.
+    private static func loadState(
+        from url: URL,
+        into target: inout [Alert.ID: Alert]
+    ) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let loaded = try decoder.decode([String: Alert].self, from: data)
+            target = loaded
+            log.info("watchdog state restored: \(loaded.count, privacy: .public) prior alert(s) from \(url.lastPathComponent, privacy: .public)")
+        } catch {
+            log.error("watchdog state load failed: \(String(describing: error), privacy: .public); starting fresh")
+        }
+    }
+
+    private func persistState() {
+        guard let url = stateURL else { return }
+        do {
+            // Ensure parent dir exists (idempotent).
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = .sortedKeys
+            let data = try encoder.encode(previousAlertsByID)
+            // Atomic write: write to .tmp then rename.
+            let tmpURL = url.appendingPathExtension("tmp")
+            try data.write(to: tmpURL, options: .atomic)
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
+        } catch {
+            Self.log.error("watchdog state persist failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Per-probe step: compare ONLY this probe's currently-firing alerts
+    /// against this probe's slice of the previously-stored snapshot.
+    ///
+    /// This is the production-correct API: each probe reports independently
+    /// (different `pollInterval`s, parallel `Task` loops), and the
+    /// scheduler calls Watchdog per-probe rather than aggregating across
+    /// all probes. The full-set `step(currentAlerts:)` below treats the
+    /// input as a complete snapshot, which is wrong when some probes have
+    /// not yet reported in a cold-start (it would emit false `cleared`
+    /// events for alerts whose probe simply hasn't ticked yet).
+    public func step(probe: String, currentAlerts: [Alert]) -> [WatchdogEvent] {
+        var events: [WatchdogEvent] = []
+        let currentByID: [Alert.ID: Alert] = Dictionary(
+            uniqueKeysWithValues: currentAlerts.map { ($0.id, $0) }
+        )
+        let previousForProbe: [Alert.ID: Alert] = previousAlertsByID.filter { _, a in a.probe == probe }
+
+        for alert in currentAlerts {
+            if let prev = previousForProbe[alert.id] {
+                if prev.severity < alert.severity {
+                    events.append(.escalated(alert, previousSeverity: prev.severity))
+                }
+                // Same / lower severity: silent (idempotent).
+            } else {
+                events.append(.appeared(alert))
+            }
+        }
+
+        let clearedIDs = previousForProbe.keys.filter { currentByID[$0] == nil }.sorted()
+        for id in clearedIDs {
+            events.append(.cleared(id))
+        }
+
+        // Atomically replace this probe's slice of the persisted snapshot.
+        previousAlertsByID = previousAlertsByID.filter { _, a in a.probe != probe }
+        for (id, alert) in currentByID {
+            previousAlertsByID[id] = alert
+        }
+
+        if !events.isEmpty {
+            persistState()
+        }
+        return events
+    }
+
+    /// Full-snapshot step: compare ALL currently-firing alerts (across
+    /// every probe) against the prior full set held in the actor.
+    ///
+    /// Useful for unit tests and contexts where the caller already has the
+    /// aggregated set. In production code prefer `step(probe:currentAlerts:)`
+    /// — see that method's docs for why per-probe semantics are correct.
     ///
     /// Event order: appearances + escalations are returned in the order
     /// `currentAlerts` is presented; clearances are appended at the end
@@ -117,6 +219,11 @@ public actor Watchdog {
         }
 
         previousAlertsByID = currentByID
+        if !events.isEmpty {
+            // Only persist when the snapshot actually changed; idempotent
+            // ticks (same alerts, same severities) leave the file alone.
+            persistState()
+        }
         return events
     }
 
@@ -144,9 +251,13 @@ public actor Watchdog {
     }
 
     /// Reset to "no prior alerts". Used by tests; the production app
-    /// holds Watchdog for the lifetime of the process.
+    /// holds Watchdog for the lifetime of the process. Also wipes the
+    /// persisted state file (if any) so the next process starts fresh.
     public func reset() {
         previousAlertsByID = [:]
+        if let url = stateURL, FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Snapshot of the currently-stored prior alert state. Read-only.

@@ -63,6 +63,20 @@ public actor StateStore {
         self.ringBufferLimit = ringBufferLimit
     }
 
+    /// Seed the active-alert set from a known-good snapshot — used at
+    /// boot to hydrate from the persisted Watchdog state, so idempotent
+    /// re-runs (no fresh `appeared` events emitted) still surface the
+    /// firing alerts via REST/MCP/popover.
+    ///
+    /// No `RecordedEvent` is appended: this is not a transition, it's a
+    /// state restore. Callers should run this **before** wiring up event
+    /// subscriptions to avoid double-counting.
+    public func seedActiveAlerts(_ alerts: [Alert]) {
+        for a in alerts {
+            activeAlertsByID[a.id] = a
+        }
+    }
+
     /// Apply a single watchdog event to the in-memory state.
     public func ingest(_ event: WatchdogEvent, at timestamp: Date = Date()) {
         recentEvents.append(RecordedEvent(timestamp: timestamp, event: event))

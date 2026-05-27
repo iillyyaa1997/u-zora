@@ -163,9 +163,7 @@ struct PopoverView: View {
                 Spacer()
             }
             HStack {
-                Button {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                } label: {
+                SettingsLink {
                     Text(String(localized: "Open Settings…", defaultValue: "Open Settings…"))
                 }
                 Spacer()

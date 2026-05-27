@@ -10,33 +10,57 @@ struct uZoraApp: App {
     var body: some Scene {
         MenuBarExtra {
             // Live dashboard popover. Replaces the placeholder Phase 4 menu.
-            if let bindings = appDelegate.bindings {
-                PopoverView(state: appDelegate.uiState)
-                    .environmentObject(bindings)
-            } else {
-                ProgressView()
-                    .frame(width: 200, height: 100)
-            }
+            // Gating-logic lives in a child View with explicit @ObservedObject
+            // so it actually re-renders when AppDelegate.bindings flips from
+            // nil to non-nil during async bootstrap.
+            PopoverGate(appDelegate: appDelegate)
         } label: {
-            // Tint the icon by overall severity so a glance at the menu
-            // bar communicates "all clear / warn / critical".
-            HStack(spacing: 4) {
-                Image(systemName: "sunrise.fill")
-                    .foregroundStyle(appDelegate.uiState.overallSeverityTint)
-                if appDelegate.uiState.overallSeverity == .critical {
-                    Text("!")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
-            }
+            MenuBarLabel(appDelegate: appDelegate)
         }
         .menuBarExtraStyle(.window)
 
         Settings {
-            if let bindings = appDelegate.bindings {
-                SettingsView(bindings: bindings, state: appDelegate.uiState)
-            } else {
-                ProgressView()
+            SettingsGate(appDelegate: appDelegate)
+        }
+    }
+}
+
+private struct PopoverGate: View {
+    @ObservedObject var appDelegate: AppDelegate
+    var body: some View {
+        if let bindings = appDelegate.bindings {
+            PopoverView(state: appDelegate.uiState)
+                .environmentObject(bindings)
+        } else {
+            ProgressView()
+                .frame(width: 200, height: 100)
+        }
+    }
+}
+
+private struct SettingsGate: View {
+    @ObservedObject var appDelegate: AppDelegate
+    var body: some View {
+        if let bindings = appDelegate.bindings {
+            SettingsView(bindings: bindings, state: appDelegate.uiState)
+        } else {
+            ProgressView()
+        }
+    }
+}
+
+private struct MenuBarLabel: View {
+    @ObservedObject var appDelegate: AppDelegate
+    var body: some View {
+        // Tint the icon by overall severity so a glance at the menu
+        // bar communicates "all clear / warn / critical".
+        HStack(spacing: 4) {
+            Image(systemName: "sunrise.fill")
+                .foregroundStyle(appDelegate.uiState.overallSeverityTint)
+            if appDelegate.uiState.overallSeverity == .critical {
+                Text("!")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
             }
         }
     }
@@ -193,9 +217,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
 
         let registry = await ProbeRegistry.defaultPopulated()
         let powerMonitor = PowerProfileMonitor()
-        let watchdog = Watchdog()
+        // Persist watchdog state alongside config/events/metrics so
+        // appeared/cleared events stay idempotent across app restarts.
+        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let watchdogStateURL = supportDir?.appendingPathComponent("uZora/watchdog-state.json")
+        let watchdog = Watchdog(stateURL: watchdogStateURL)
         let eventBus = EventBus()
         let stateStore = StateStore()
+        // Seed StateStore from persisted Watchdog state so /alerts and the
+        // popover surface still-firing alerts immediately on restart —
+        // without waiting for fresh `appeared` events (Watchdog correctly
+        // suppresses those when state was loaded from disk).
+        let persistedAlerts = Array(await watchdog.snapshot().values)
+        if !persistedAlerts.isEmpty {
+            await stateStore.seedActiveAlerts(persistedAlerts)
+        }
         self.registry = registry
         self.bus = eventBus
         self.stateStore = stateStore
@@ -397,9 +433,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             let pct = Double(totalRSS) / Double(totalBytes) * 100
             uiState.recordMetric(probe: "memory", value: min(pct, 100))
         }
-        // Top processes.
+        // Top processes — live computed from ProcessSampler snapshots.
         let snaps = ProcessSampler.snapshotAll()
+
+        // Top memory: 3 largest RSS (skip system kernel_task at PID 0).
         let byMem = snaps
+            .filter { $0.pid > 0 }
             .sorted { $0.residentSizeBytes > $1.residentSizeBytes }
             .prefix(3)
             .map {
@@ -411,26 +450,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 )
             }
         uiState.topMemProcesses = Array(byMem)
-        // Top CPU is best computed off the live TopCPUProcessProbe state;
-        // for the dashboard we approximate from the alerts (kernel_task /
-        // top_cpu give visible CPU%). Build a name+pct list from the
-        // current active alerts of probe == top_cpu.
-        let cpuFromAlerts = uiState.activeAlerts
-            .filter { $0.probe == "top_cpu" }
-            .compactMap { alert -> UIState.ProcessSnap? in
-                guard let pidStr = alert.details?["pid"], let pid = Int32(pidStr) else { return nil }
-                let cmd = alert.details?["command"] ?? alert.key
-                let pct = Double(alert.details?["cpu_pct"] ?? "0") ?? 0
-                return UIState.ProcessSnap(pid: pid, name: cmd, cpuPct: pct, rssBytes: 0)
+
+        // Top CPU: per-PID CPU% via snapshot delta against previous tick.
+        // First tick has no previous → fall back to memory-by-RSS so the
+        // section paints something instead of looking broken.
+        var topCPU: [UIState.ProcessSnap] = []
+        if let prev = previousSnaps {
+            let prevByPID = Dictionary(uniqueKeysWithValues: prev.map { ($0.pid, $0) })
+            var byCPU: [(snap: ProcessSampler.Snapshot, pct: Double)] = []
+            for s in snaps where s.pid > 0 {
+                guard let p = prevByPID[s.pid],
+                      let pct = ProcessSampler.cpuPercent(previous: p, current: s),
+                      pct > 0.05  // suppress idle / 0% noise
+                else { continue }
+                byCPU.append((s, pct))
             }
-        if !cpuFromAlerts.isEmpty {
-            uiState.topCPUProcesses = cpuFromAlerts
-        } else if uiState.topCPUProcesses.isEmpty {
-            // Fallback: show the largest RSS processes (so the section
-            // never looks empty on a quiet machine).
-            uiState.topCPUProcesses = uiState.topMemProcesses
+            byCPU.sort { $0.pct > $1.pct }
+            topCPU = byCPU.prefix(5).map {
+                UIState.ProcessSnap(
+                    pid: $0.snap.pid,
+                    name: $0.snap.name,
+                    cpuPct: $0.pct,
+                    rssBytes: $0.snap.residentSizeBytes
+                )
+            }
         }
+        if topCPU.isEmpty {
+            // Day-zero / quiet system: show top-RSS as placeholder so the
+            // section never looks broken.
+            topCPU = Array(byMem)
+        }
+        uiState.topCPUProcesses = topCPU
+        self.previousSnaps = snaps
     }
+
+    /// Previous ProcessSampler snapshot — kept on the actor for per-PID
+    /// CPU% delta computation across refresh ticks.
+    private var previousSnaps: [ProcessSampler.Snapshot]?
 
     /// Phase 6: prune metric rows older than 7 days every 24 h. Runs in
     /// a detached `Task` so it survives app-lifetime; cancelled on

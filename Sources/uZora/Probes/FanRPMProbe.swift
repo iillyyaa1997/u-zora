@@ -151,7 +151,7 @@ public final class FanRPMProbe: Probe, @unchecked Sendable {
         public func message(forFan fan: FanSample) -> String {
             // Use rounded() + String(format:) to avoid Int(Double) trap on
             // non-finite SMC readings; clamp to a sane upper bound.
-            let safeRPM = fan.rpm.isFinite ? min(max(fan.rpm, 0), 30000).rounded() : 0
+            let safeRPM = fan.rpm.isFinite ? min(max(fan.rpm, 0), 10000).rounded() : 0
             let rpmStr = String(format: "%.0f", safeRPM)
             switch self {
             case .ok:
@@ -219,10 +219,10 @@ public final class FanRPMProbe: Probe, @unchecked Sendable {
             let key = "F\(i)Ac"
             guard let val = IOKitBridge.readSMCKey(key, conn: conn) else { continue }
             // Most hardware reports `flt` (4-byte big-endian float).
-            // Bound to physically plausible RPM (<30000) to reject junk reads.
-            if let rpm = val.asFloat, rpm.isFinite, rpm >= 0, rpm < 30000 {
+            // Bound to physically plausible RPM (<10000) to reject junk reads.
+            if let rpm = val.asFloat, rpm.isFinite, rpm >= 0, rpm < 10000 {
                 fans.append(FanSample(index: i, rpm: Double(rpm)))
-            } else if let raw = val.asUInt, raw < 30000 {
+            } else if let raw = val.asUInt, raw < 10000 {
                 // Older SMC firmware exposes `fpe2` (UInt16 / 4); we fall back
                 // to a UInt cast and divide as a best-effort approximation.
                 fans.append(FanSample(index: i, rpm: Double(raw)))

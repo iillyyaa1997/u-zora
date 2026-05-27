@@ -67,7 +67,7 @@ private struct GeneralTab: View {
                 )) {
                     Text(String(localized: "System", defaultValue: "System")).tag("system")
                     Text("English").tag("en")
-                    Text("Русский").tag("ru")
+                    Text("Russian").tag("ru")
                 }
                 .pickerStyle(.menu)
 

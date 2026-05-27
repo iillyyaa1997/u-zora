@@ -9,7 +9,7 @@ monitoring. LLM-agnostic via MCP + JSONL + HTTP REST + SSE.
 [![macOS 26 Tahoe+](https://img.shields.io/badge/macOS-26%20Tahoe%2B-black)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon-black)](https://support.apple.com/en-us/HT211814)
 
-uZora ("sunrise" — за́ря) sits in your menu bar, polls ten built-in probes
+uZora (from Russian "zarya" — sunrise) sits in your menu bar, polls ten built-in probes
 (disk, CPU temperature, thermal pressure, battery, SMART, fans,
 `kernel_task`, top CPU/memory/network processes) and surfaces problems
 through native UN notifications, a popover dashboard with live charts,

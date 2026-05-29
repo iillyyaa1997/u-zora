@@ -77,6 +77,11 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
 
     public var defaultMetricKey: String { "package" }
 
+    /// Test affordance: the thresholds this instance was constructed with,
+    /// so config-wiring tests can assert the °C mapping. Internal —
+    /// `@testable import`.
+    var configuredThresholds: Thresholds { thresholds }
+
     /// Phase 6: latest CPU package temperature, for sparkline history.
     public func currentMetrics() async -> [String: Double] {
         guard let s = sampler() else { return [:] }

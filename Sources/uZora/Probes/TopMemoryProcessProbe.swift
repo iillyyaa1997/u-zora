@@ -79,6 +79,11 @@ public final class TopMemoryProcessProbe: Probe, @unchecked Sendable {
         self.hostMemoryProvider = hostMemoryProvider
     }
 
+    /// Test affordance: the thresholds this instance was constructed with,
+    /// so config-wiring tests can assert the GB→bytes mapping. Internal —
+    /// `@testable import`.
+    var configuredThresholds: Thresholds { thresholds }
+
     public func run() async throws -> [Alert] {
         let now = clock()
         let hostTotalBytes = hostMemoryProvider()

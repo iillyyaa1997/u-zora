@@ -89,6 +89,11 @@ public final class KernelTaskProbe: Probe, @unchecked Sendable {
 
     public var defaultMetricKey: String { "kernel_task" }
 
+    /// Test affordance: the thresholds this instance was constructed with,
+    /// so config-wiring tests can assert the CPU-percent mapping. Internal —
+    /// `@testable import`.
+    var configuredThresholds: Thresholds { thresholds }
+
     /// Phase 6: latest kernel_task CPU%. Emits the most recently observed
     /// value (set as a side effect of `run()` after the first delta is
     /// available). Returns empty until then, which the store treats as

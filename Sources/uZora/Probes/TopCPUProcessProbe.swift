@@ -87,6 +87,11 @@ public final class TopCPUProcessProbe: Probe, @unchecked Sendable {
         self.sampler = sampler
     }
 
+    /// Test affordance: the thresholds this instance was constructed with,
+    /// so config-wiring tests can assert the CPU-percent mapping. Internal —
+    /// `@testable import`.
+    var configuredThresholds: Thresholds { thresholds }
+
     public func run() async throws -> [Alert] {
         let now = clock()
         let current = sampler()

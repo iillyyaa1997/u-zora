@@ -232,7 +232,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             }
         }
 
-        let registry = await ProbeRegistry.defaultPopulated()
+        // Phase 5: build the probe set FROM the loaded config so only
+        // enabled probes register and config thresholds/poll-intervals
+        // apply from the first tick (not just after a later hot-reload).
+        let registry = await ProbeRegistry.defaultPopulated(config: initial)
         let powerMonitor = PowerProfileMonitor()
         // Persist watchdog state alongside config/events/metrics so
         // appeared/cleared events stay idempotent across app restarts.
@@ -263,6 +266,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         self.registry = registry
         self.bus = eventBus
         self.stateStore = stateStore
+        // Let the registry refresh the probe roster + synthesise clears for
+        // disabled probes during config hot-reload (reconfigure).
+        await registry.attachStateStore(stateStore)
 
         // Phase 6: open the SQLite metrics store and start a daily purge
         // loop. Failure to open downgrades the app to "no historical
@@ -295,10 +301,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         await notifs.requestAuthorization()
         self.notifications = notifs
 
-        // Seed the probe inventory in the state store.
+        // Seed the probe inventory in the state store, reflecting each
+        // probe's config-effective base poll interval.
         let names = await registry.registeredNames()
-        let inventory: [StateStore.ProbeInfo] = names.map { name in
-            StateStore.ProbeInfo(name: name, pollIntervalSeconds: 0, lastRunAt: nil)
+        var inventory: [StateStore.ProbeInfo] = []
+        for name in names {
+            let secs = (await registry.configuredBaseInterval(forProbeNamed: name)?.components.seconds).map(Double.init) ?? 0
+            inventory.append(StateStore.ProbeInfo(name: name, pollIntervalSeconds: secs, lastRunAt: nil))
         }
         await stateStore.setProbes(inventory)
         uiState.probeNames = names
@@ -381,6 +390,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
 
         await registry.start(watchdog: watchdog, eventBus: eventBus)
         log.info("uZora launched, registered \(names.count, privacy: .public) probes, bridge on :\(port, privacy: .public)")
+
+        // Hot-reload: when config.toml changes, rebuild the probe set with
+        // the new enables/thresholds/poll-intervals. The ConfigLoader
+        // watcher already debounces ~150ms; `observe` fires once
+        // synchronously at registration with the *current* config — we skip
+        // that initial fire (the registry was just built from it) and only
+        // act on subsequent reloads. Probe-roster changes are mirrored into
+        // `uiState.probeNames` for the popover.
+        let registryRef = registry
+        let uiStateForRoster = uiState
+        let reconfigureOnReload: ConfigLoader.ReloadCallback = { config in
+            Task {
+                await registryRef.reconfigure(config)
+                let updatedNames = await registryRef.registeredNames()
+                await MainActor.run { uiStateForRoster.probeNames = updatedNames }
+            }
+        }
+        await loader.observe(reconfigureOnReload, skippingInitial: true)
 
         // Drive a 5s refresh loop that pulls metric sparklines + process
         // top-N from the live samplers. Phase 5 stops short of SQLite —

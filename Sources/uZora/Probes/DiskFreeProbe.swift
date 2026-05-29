@@ -72,6 +72,11 @@ public final class DiskFreeProbe: Probe, @unchecked Sendable {
 
     public var defaultMetricKey: String { "/" }
 
+    /// Test affordance: the thresholds this instance was constructed with,
+    /// so config-wiring tests can assert the percent→fraction mapping
+    /// without needing a real disk. Internal — `@testable import`.
+    var configuredThresholds: Thresholds { thresholds }
+
     /// Phase 6: latest disk-free numbers. Available regardless of alert
     /// state — the popover graph shows a flat-OK line on a healthy disk.
     public func currentMetrics() async -> [String: Double] {

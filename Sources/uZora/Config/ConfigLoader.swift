@@ -89,9 +89,21 @@ public actor ConfigLoader {
     /// at registration time. Returns a token usable with `unobserve(_:)`.
     @discardableResult
     public func observe(_ callback: @escaping ReloadCallback) -> UUID {
+        observe(callback, skippingInitial: false)
+    }
+
+    /// Subscribe to reload events, optionally suppressing the one-shot
+    /// invocation with `current` at registration time. Pass
+    /// `skippingInitial: true` when the subscriber already reflects the
+    /// current config (e.g. the probe registry was just built from it) and
+    /// only cares about *subsequent* hot-reloads.
+    @discardableResult
+    public func observe(_ callback: @escaping ReloadCallback, skippingInitial: Bool) -> UUID {
         let token = UUID()
         observers.append((token, callback))
-        callback(current)
+        if !skippingInitial {
+            callback(current)
+        }
         return token
     }
 

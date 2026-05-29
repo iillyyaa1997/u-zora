@@ -29,41 +29,94 @@ banner_severity_floor = "warn"
 # Suppress warn banners while Focus is active (critical always pierces).
 respect_focus = true
 
-# Per-probe overrides. Each section accepts:
-#   enabled            (bool, default true)
-#   warn_threshold     (float, probe-specific units)
-#   critical_threshold (float, probe-specific units)
-#   poll_interval_sec  (int, override default cadence)
+# Per-probe overrides. Every section accepts:
+#   enabled            (bool, default true) — a disabled probe is NOT run.
+#   poll_interval_sec  (int)  — override the probe's default cadence. The
+#                               active power profile still multiplies this
+#                               (e.g. on battery the effective interval is
+#                               longer). Omit to keep the probe default.
+#   warn_threshold     (float, probe-specific units — see each section)
+#   critical_threshold (float, probe-specific units — see each section)
+#
+# Threshold UNITS differ per probe and several probes IGNORE the generic
+# warn/critical pair entirely (their alerting is multi-dimensional or
+# discrete). Each section below documents exactly what applies.
+# Omitted threshold keys keep the probe's built-in default.
 
+# disk — boot-volume free space.
+#   warn_threshold / critical_threshold: PERCENT free (e.g. 15 = warn when
+#     under 15% free; 5 = critical under 5%). Defaults: warn 15, critical 5.
 [probes.disk]
 enabled = true
+# warn_threshold = 15
+# critical_threshold = 5
 
+# cpu_temp — CPU package temperature.
+#   warn_threshold / critical_threshold: degrees CELSIUS (e.g. 90 / 100).
+#   Defaults: warn 90, critical 100.
 [probes.cpu_temp]
 enabled = true
+# warn_threshold = 90
+# critical_threshold = 100
 
+# thermal — ProcessInfo thermal pressure (nominal/fair/serious/critical).
+#   IGNORES warn_threshold / critical_threshold (discrete state mapping).
+#   Only `enabled` and `poll_interval_sec` apply.
 [probes.thermal]
 enabled = true
 
+# battery — charge %, cycle count, and condition string.
+#   IGNORES warn_threshold / critical_threshold (multi-dimensional; not
+#   config-exposed in MVP). Only `enabled` and `poll_interval_sec` apply.
 [probes.battery]
 enabled = true
 
+# smart — internal NVMe health (available-spare %, used %, media errors,
+#   critical-warning bitmask).
+#   IGNORES warn_threshold / critical_threshold (multi-dimensional; not
+#   config-exposed in MVP). Only `enabled` and `poll_interval_sec` apply.
 [probes.smart]
 enabled = true
 
+# fan — fan RPM (low-RPM stuck-fan AND high-RPM noisy detection).
+#   IGNORES warn_threshold / critical_threshold (two-sided low/high band
+#   doesn't map to a single generic pair; not config-exposed in MVP).
+#   Only `enabled` and `poll_interval_sec` apply.
 [probes.fan]
 enabled = true
 
+# kernel_task — kernel_task CPU% (Apple-Silicon throttling indicator).
+#   warn_threshold / critical_threshold: CPU PERCENT (e.g. 25 / 50).
+#   Defaults: warn 25, critical 50. (Sustained-window seconds are fixed.)
 [probes.kernel_task]
 enabled = true
+# warn_threshold = 25
+# critical_threshold = 50
 
+# top_cpu — busiest process CPU%.
+#   warn_threshold / critical_threshold: CPU PERCENT (e.g. 50 / 80).
+#   Defaults: warn 50, critical 80. (Sustained-window seconds are fixed.)
 [probes.top_cpu]
 enabled = true
+# warn_threshold = 50
+# critical_threshold = 80
 
+# top_mem — largest-RSS process.
+#   warn_threshold / critical_threshold: GIGABYTES of resident memory
+#   (binary GiB, e.g. 8 / 16). Defaults: warn 8, critical 16.
 [probes.top_mem]
 enabled = true
+# warn_threshold = 8
+# critical_threshold = 16
 
+# top_net — busiest process network throughput (in + out).
+#   warn_threshold / critical_threshold: MEGABYTES per second (binary
+#   MiB/s, e.g. 50 / 200). Defaults: warn 50, critical 200.
+#   (Sustained-window seconds are fixed.)
 [probes.top_net]
 enabled = true
+# warn_threshold = 50
+# critical_threshold = 200
 
 # Per power-state overrides. Empty sections take the built-in defaults
 # (see Core/PowerProfile.swift `defaultMapping`).

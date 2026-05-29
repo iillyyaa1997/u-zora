@@ -258,5 +258,10 @@ public actor ProbeRegistry {
         register(TopCPUProcessProbe())
         register(TopMemoryProcessProbe())
         register(TopNetworkProcessProbe())
+        // E2E-only: a deterministic always-firing probe, registered solely
+        // when UZORA_E2E_SYNTHETIC_ALERT is set. No-op in production.
+        if let synthetic = SyntheticAlertProbe.fromEnvironment() {
+            register(synthetic)
+        }
     }
 }

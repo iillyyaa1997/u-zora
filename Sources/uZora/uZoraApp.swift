@@ -236,8 +236,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let powerMonitor = PowerProfileMonitor()
         // Persist watchdog state alongside config/events/metrics so
         // appeared/cleared events stay idempotent across app restarts.
-        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        let watchdogStateURL = supportDir?.appendingPathComponent("uZora/watchdog-state.json")
+        // Override the path via UZORA_WATCHDOG_STATE_PATH for isolated E2E
+        // runs (so tests don't clobber the operator's real state file).
+        let watchdogStateURL: URL?
+        if let envPath = ProcessInfo.processInfo.environment["UZORA_WATCHDOG_STATE_PATH"] {
+            watchdogStateURL = URL(fileURLWithPath: envPath)
+        } else {
+            let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            watchdogStateURL = supportDir?.appendingPathComponent("uZora/watchdog-state.json")
+        }
         let watchdog = Watchdog(stateURL: watchdogStateURL)
         let eventBus = EventBus()
         let stateStore = StateStore()

@@ -41,3 +41,24 @@ jobs:
           plutil -extract LSMinimumSystemVersion raw Sources/uZora/Support/Info.plist \
             | tee /tmp/min-os-version
           test "$(cat /tmp/min-os-version)" = "26.0"
+
+  e2e:
+    name: end-to-end
+    needs: test
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: which jq || brew install jq
+
+      - name: End-to-end harness
+        # Launches the real release binary in an isolated environment and
+        # exercises every external surface (REST / MCP / SSE / JSONL /
+        # SQLite / restart-persistence / graceful shutdown) through real
+        # process boundaries. The synthetic-alert test seam makes the run
+        # deterministic regardless of the runner's hardware state.
+        run: Tests/e2e/run-e2e.sh

@@ -292,17 +292,39 @@ public actor PowerProfileMonitor {
     }
 
     private static func readFocusActive() -> Bool {
-        // Phase 3 stub: returning false unconditionally.
+        // Deliberately returns false on the free, ad-hoc-signed build.
         //
-        // TODO Phase 5: detect Focus state without entitlements.
-        // The public `INFocusStatusCenter` requires
-        // `INFocusStatusAuthorizationStatus.authorized` from the user
-        // (a system-modal dialog on first call). For an unattended
-        // menu-bar daemon this needs the Settings UI to land first so
-        // the user can grant permission knowingly.
+        // There is no zero-cost, reliable way to AUTO-detect the active
+        // Focus mode on a non-sandboxed, ad-hoc-signed app targeting
+        // macOS 26 Tahoe:
         //
-        // Until then we deliberately do NOT trigger the auth dialog;
-        // returning false means alerts at all severities still surface.
+        //   • INFocusStatusCenter (Intents) — needs the "Communication
+        //     Notifications" capability (`com.apple.developer.usernotif-
+        //     ications.communication`), which only a paid Apple Developer
+        //     provisioning profile can grant. Ad-hoc `codesign --sign -`
+        //     can't carry it, so requestAuthorization never succeeds.
+        //   • ~/Library/DoNotDisturb/DB/Assertions.json — requires Full
+        //     Disk Access AND its format/location changed on Tahoe, so the
+        //     long-standing file-scrape trick is broken on our target OS.
+        //   • SetFocusFilterIntent (AppIntents) — works free + non-sandbox,
+        //     but it's a PUSH model: the user configures uZora as a Focus
+        //     Filter in System Settings; it isn't auto-detection. A future
+        //     opt-in (see ROADMAP); intentionally not wired here.
+        //
+        // The important part: we don't NEED app-side detection for the
+        // actual product requirement (Q22 — "warn stays quiet in Focus,
+        // critical pierces"). macOS already enforces that through
+        // notification interruption levels: warn banners ship as `.active`
+        // (the OS withholds them during Focus) and critical ships as
+        // `.timeSensitive` (pierces Focus when the user has allowed Time-
+        // Sensitive notifications for uZora). See UZoraNotificationCenter.
+        //
+        // So `focusActive` stays false → PowerProfile never enters the
+        // `.focusActive` state → uZora never additionally suppresses warn
+        // alerts from the EventBus/JSONL/MCP channels (which LLM clients
+        // and the popover SHOULD keep seeing regardless of Focus). The
+        // .focusActive PowerState + PowerSignals.focusActive field remain
+        // as a hook a future SetFocusFilterIntent / paid build can feed.
         return false
     }
 }

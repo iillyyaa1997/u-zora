@@ -299,6 +299,12 @@ private struct NotificationsTab: View {
                 )) {
                     Text(String(localized: "Respect Focus mode", defaultValue: "Respect Focus mode"))
                 }
+                Text(String(
+                    localized: "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications.",
+                    defaultValue: "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Section {
                 Button {
@@ -306,6 +312,22 @@ private struct NotificationsTab: View {
                 } label: {
                     Text(String(localized: "Test notification", defaultValue: "Test notification"))
                 }
+                Button {
+                    // Critical alerts only pierce Focus if the user has
+                    // allowed Time-Sensitive notifications for uZora. Open
+                    // the Notifications pane so they can enable it.
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text(String(localized: "Notification Settings…", defaultValue: "Notification Settings…"))
+                }
+                Text(String(
+                    localized: "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus.",
+                    defaultValue: "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

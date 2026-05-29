@@ -14,6 +14,8 @@
 "Critical" = "Критическая";
 "Dark" = "Тёмная";
 "Disk free" = "Диск свободно";
+"Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus." = "Включите там «Уведомления, чувствительные ко времени» для uZora, чтобы критические оповещения пробивали Focus.";
+"Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications." = "Focus обрабатывается macOS: баннеры warn автоматически скрываются во время Focus, а критические уведомления пробиваются как Time-Sensitive.";
 "General" = "Общие";
 "HTTP server enabled" = "HTTP-сервер включён";
 "Info" = "Инфо";
@@ -24,6 +26,7 @@
 "MCP URL" = "Адрес MCP";
 "MCP server enabled" = "MCP-сервер включён";
 "Memory" = "Память";
+"Notification Settings…" = "Настройки уведомлений…";
 "Notifications" = "Уведомления";
 "Open Activity Monitor" = "Открыть Мониторинг системы";
 "Open Battery Settings" = "Открыть настройки аккумулятора";

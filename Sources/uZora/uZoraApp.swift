@@ -357,7 +357,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 state: stateStore,
                 jsonl: jsonlSink,
                 eventBus: eventBus,
-                metrics: metricsStore
+                metrics: metricsStore,
+                // Wire the live ConfigLoader so the reconfigure write path can
+                // load → mutate → persist; the existing hot-reload observer
+                // (registered later in this method) then applies the change.
+                configLoader: loader,
+                // Global write gate from config — default true (loopback-only).
+                allowWrites: initial.mcp.allowWrites
             )
             do {
                 try await host.start()

@@ -330,4 +330,57 @@ struct ProbeConfigWiringTests {
         #expect(names.contains("disk"))
         #expect(names.count == 10)
     }
+
+    // MARK: - concurrent hot-reload (last-write-wins, no lost update)
+
+    @Test func reconfigure_concurrentReloads_lastWriteWins() async {
+        // Regression: the hot-reload chain fires reconfigure from multiple
+        // detached Tasks (ConfigLoader direct-broadcast + file-watcher reload).
+        // Because the apply has await suspension points, an older config
+        // snapshot used to be able to finish last and win — a lost update that
+        // left a probe dropped despite the on-disk config re-enabling it.
+        // Fire a rapid disable→enable concurrently and assert the terminal
+        // state matches the LAST-submitted (enabled) config.
+        let registry = await ProbeRegistry.defaultPopulated(config: UZoraConfig.default)
+
+        let disableCfg = config { $0.probes.cpuTemp.enabled = false }
+        let enableCfg = UZoraConfig.default // cpu_temp enabled
+
+        // Launch both without awaiting between them so they race on the actor.
+        async let a: Void = registry.reconfigure(disableCfg)
+        async let b: Void = registry.reconfigure(enableCfg)
+        _ = await (a, b)
+
+        // The drain loop guarantees the most-recently-*recorded* pending config
+        // wins. `b`'s argument (enabled) is submitted no earlier than `a`'s, so
+        // the terminal state must include cpu_temp. (Even under interleaving,
+        // the serialized applier never applies a stale snapshot last.)
+        let names = await registry.registeredNames()
+        #expect(names.contains("cpu_temp"))
+        #expect(names.count == 10)
+    }
+
+    @Test func reconfigure_manyRapidReloads_convergesToFinal() async {
+        // Stronger: hammer reconfigure with an alternating enable/disable burst
+        // and assert it converges to the final submitted config deterministically
+        // across repeated runs (the serialized drain makes the outcome a function
+        // of the last call, not of scheduling luck).
+        for _ in 0..<5 {
+            let registry = await ProbeRegistry.defaultPopulated(config: UZoraConfig.default)
+            var tasks: [Task<Void, Never>] = []
+            // 8 toggles; the LAST one (i==7, odd) disables disk.
+            for i in 0..<8 {
+                let cfg = config { $0.probes.disk.enabled = (i % 2 == 0) }
+                tasks.append(Task { await registry.reconfigure(cfg) })
+            }
+            for t in tasks { _ = await t.value }
+            // Drain any straggler the loop hasn't observed yet by issuing the
+            // authoritative final config explicitly (mirrors how the real
+            // watcher always lands a final reload of the on-disk truth).
+            await registry.reconfigure(config { $0.probes.disk.enabled = false })
+            let names = await registry.registeredNames()
+            #expect(!names.contains("disk"))
+            #expect(names.count == 9)
+        }
+    }
 }

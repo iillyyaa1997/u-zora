@@ -27,6 +27,13 @@ public actor ProbeRegistry {
     private var eventBus: EventBus?
     private var stateStore: StateStore?
 
+    /// Hot-reload serialization (see `reconfigure(_:)`). `pendingConfig` is the
+    /// most-recently-requested config; `reconfiguring` guards the single
+    /// in-flight applier so overlapping reloads can't apply a stale snapshot
+    /// last.
+    private var pendingConfig: UZoraConfig?
+    private var reconfiguring = false
+
     /// Config-derived per-probe poll-interval overrides (the *base* cadence,
     /// before the PowerProfile multiplier is applied). Populated from
     /// `ProbeOverride.pollIntervalSec`; a probe absent from this map keeps
@@ -516,7 +523,37 @@ public actor ProbeRegistry {
     ///
     /// Safe to call whether or not `start()` has run yet — if the scheduler
     /// was idle the probe set is simply rebuilt and left idle.
+    ///
+    /// **Serialized + last-write-wins.** The hot-reload chain fires this from
+    /// detached `Task`s (the ConfigLoader direct-broadcast AND the file-watcher
+    /// reload both trigger it), so two reloads in quick succession used to spawn
+    /// overlapping `reconfigure` invocations. Because the actual apply has
+    /// `await` suspension points, an *older* config snapshot could finish last
+    /// and win — a lost update (verified: rapid disable→enable left the probe
+    /// dropped despite config.toml saying enabled). We now record the latest
+    /// requested config and drain it through a single in-flight applier, so the
+    /// terminal probe set always reflects the most-recently-submitted config.
     public func reconfigure(_ config: UZoraConfig) async {
+        // Record the newest desired config. If an apply is already draining,
+        // it will pick this up — return without starting a second one.
+        pendingConfig = config
+        if reconfiguring { return }
+        reconfiguring = true
+        defer { reconfiguring = false }
+        // Drain: apply the latest pending config until none is queued. A
+        // config that arrives *during* an apply (set on `pendingConfig` by a
+        // concurrent caller) is handled by the next loop iteration, so the
+        // last writer always wins and we never apply a stale snapshot last.
+        while let next = pendingConfig {
+            pendingConfig = nil
+            await applyReconfigure(next)
+        }
+    }
+
+    /// The actual rebuild. Only ever invoked from the serialized drain loop in
+    /// `reconfigure(_:)`, so its `await` points can't interleave with another
+    /// apply.
+    private func applyReconfigure(_ config: UZoraConfig) async {
         let wasRunning = isRunning
 
         // 1. Stop current tasks (mirrors stop() but keeps wiring refs).

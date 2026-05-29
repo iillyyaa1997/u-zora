@@ -54,10 +54,12 @@ _Screenshots will land alongside the first signed release — see
       Support/uZora/events/events-YYYY-MM-DD.jsonl` (daily rotated,
       configurable retention)
     - **HTTP REST** at `127.0.0.1:39842/{status,alerts,probes,metrics}`
+      plus the write endpoints `POST /alerts/ack` and `POST /config/probe`
     - **SSE** stream at `GET /stream` (replays last N + live tail)
-    - **MCP** JSON-RPC 2.0 at `POST /mcp` — five tools:
-      `uzora_status`, `uzora_list_alerts`, `uzora_get_probe_metrics`,
-      `uzora_get_probe_details`, `uzora_subscribe`
+    - **MCP** JSON-RPC 2.0 at `POST /mcp` — seven tools: five read
+      (`uzora_status`, `uzora_list_alerts`, `uzora_list_probes`,
+      `uzora_get_metric`, `uzora_subscribe`) and two write
+      (`uzora_ack_alert`, `uzora_set_probe_config`, gated by `allow_writes`)
 - **SQLite metrics history** (Phase 6) — every probe's numeric readings
   persisted to `metrics.sqlite` with 7-day retention; `GET /metrics`
   returns timeseries JSON
@@ -137,6 +139,7 @@ port = 39842
 
 [mcp]
 enabled = true
+allow_writes = true      # gate the two write tools/endpoints (see below)
 
 [notifications]
 banner_severity_floor = "warn"   # "info" | "warn" | "critical"
@@ -192,6 +195,56 @@ the model will call `uzora_status` / `uzora_list_alerts`.
     }
   }
 }
+```
+
+### Write tools (acknowledge + reconfigure)
+
+Beyond reading, an LLM (or any HTTP client) can **acknowledge** a firing
+alert and **reconfigure** a probe. Both are loopback-only and gated by
+`[mcp] allow_writes` (default `true`; set `false` to make every write
+return HTTP 403 / MCP `isError`). They are the "LLM sees → LLM acts" loop —
+**not** arbitrary action execution (no shell, no process-kill).
+
+**`uzora_ack_alert`** — dismiss a currently-firing alert (UI-state only;
+does not touch the OS). The alert stays hidden until it escalates or
+clears. Get ids from `uzora_list_alerts` (the `id` field, e.g. `disk:/`):
+
+```jsonc
+// MCP tools/call
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"uzora_ack_alert","arguments":{"id":"disk:/"}}}
+```
+
+```sh
+# REST equivalent (id in the body — alert ids embed ":" and "/")
+curl -s -X POST http://127.0.0.1:39842/alerts/ack \
+  -H 'Content-Type: application/json' -d '{"id":"disk:/"}'
+# → {"acknowledged":true,"id":"disk:/"}
+```
+
+**`uzora_set_probe_config`** — change one probe's `enabled` /
+`warn_threshold` / `critical_threshold` / `poll_interval_sec`, persisted to
+`config.toml` and hot-reloaded within ~150ms. Threshold units match
+[`sample-config.toml`](Resources/sample-config.toml): disk = percent-free,
+cpu_temp/kernel_task/top_cpu = direct, top_mem = GiB, top_net = MiB/s. The
+`fan`, `battery`, `smart`, and `thermal` probes **ignore** thresholds
+(their alerting is discrete or multi-dimensional) — a threshold sent to one
+of them is **not persisted** and the response carries a `warnings` entry;
+`enabled` / `poll_interval_sec` still apply.
+
+```jsonc
+// MCP tools/call
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"uzora_set_probe_config",
+           "arguments":{"probe":"disk","warn_threshold":20,"poll_interval_sec":30}}}
+```
+
+```sh
+# REST equivalent (probe in the body)
+curl -s -X POST http://127.0.0.1:39842/config/probe \
+  -H 'Content-Type: application/json' \
+  -d '{"probe":"disk","enabled":true,"warn_threshold":20}'
+# → {"config":{"enabled":true,"warn_threshold":20},"probe":"disk","updated":true,"warnings":[]}
 ```
 
 ### JSONL log tailing

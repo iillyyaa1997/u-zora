@@ -22,6 +22,15 @@ port = 39842
 [mcp]
 # Toggle MCP without disabling the rest of the HTTP bridge.
 enabled = true
+# Global write gate for the bridge. When true (default — loopback-only
+# personal use) the write surfaces are live:
+#   MCP tools : uzora_ack_alert, uzora_set_probe_config
+#   REST      : POST /alerts/ack, POST /config/probe
+# When false they all return HTTP 403 / MCP isError. The write tools are
+# still ADVERTISED in tools/list (with a "writes disabled" note) so clients
+# get a clear error instead of "unknown tool". This is a single on/off, not
+# per-client auth.
+allow_writes = true
 
 [notifications]
 # Banner severity floor: "info", "warn", "critical".

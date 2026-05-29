@@ -57,6 +57,39 @@ public struct MCPTools: Sendable {
             let resp = await rest.metrics(probe: probe, from: fromDate, to: toDate)
             return MCPTools.wrap(resp)
 
+        case "uzora_ack_alert":
+            // Write: acknowledge a firing alert. Single-sourced through the
+            // same REST handler `POST /alerts/ack` uses; the handler itself
+            // enforces the `allow_writes` gate (403 → isError) and 404 for an
+            // unknown id.
+            var id: String? = nil
+            if case .object(let args) = arguments,
+               case .string(let s)? = args["id"] {
+                id = s
+            }
+            let resp = await rest.acknowledgeAlert(id: id)
+            return MCPTools.wrap(resp)
+
+        case "uzora_set_probe_config":
+            // Write: reconfigure one probe and persist to config.toml (the
+            // existing hot-reload observer then applies it). Same handler as
+            // `POST /config/probe`; the handler enforces `allow_writes` (403),
+            // unknown-probe (400), and the fan/battery/smart/thermal
+            // threshold-drop `warnings`.
+            var probe: String? = nil
+            var patch = RESTHandlers.ProbeConfigPatch()
+            if case .object(let args) = arguments {
+                if case .string(let s)? = args["probe"] { probe = s }
+                if case .bool(let b)? = args["enabled"] { patch.enabled = b }
+                patch.warnThreshold = MCPTools.number(args["warn_threshold"])
+                patch.criticalThreshold = MCPTools.number(args["critical_threshold"])
+                if let poll = MCPTools.number(args["poll_interval_sec"]) {
+                    patch.pollIntervalSec = Int(poll.rounded())
+                }
+            }
+            let resp = await rest.reconfigureProbe(name: probe, patch: patch)
+            return MCPTools.wrap(resp)
+
         case "uzora_subscribe":
             // Phase 4 simplification: MCP notifications-over-SSE-transport
             // is deferred to Phase 6+. Until then, the tool returns the
@@ -81,6 +114,16 @@ public struct MCPTools: Sendable {
                 code: .toolNotFound,
                 message: "no such tool: \(name)"
             )
+        }
+    }
+
+    /// Coerce an MCP argument `JSONValue` (`.int` or `.double`) to `Double`.
+    /// nil for null / absent / non-numeric.
+    static func number(_ v: JSONValue?) -> Double? {
+        switch v {
+        case .int(let i):    return Double(i)
+        case .double(let d): return d
+        default:             return nil
         }
     }
 
@@ -112,7 +155,22 @@ public struct MCPTools: Sendable {
 
     // MARK: - Tool schemas (returned by tools/list)
 
-    public static let schemas: [[String: JSONValue]] = [
+    /// Per-instance tool list. Read tools are always present; the two write
+    /// tools are **always listed** (so a client gets a clear 403 isError
+    /// rather than an "unknown tool" error) but their description notes when
+    /// writes are currently disabled. The gate itself lives in the REST
+    /// handlers — listing here is purely advisory.
+    public func listSchemas() -> [[String: JSONValue]] {
+        MCPTools.readSchemas + MCPTools.writeSchemas(allowWrites: rest.allowWrites)
+    }
+
+    /// Back-compat alias: the full tool list assuming writes are enabled
+    /// (the default). Prefer the instance `listSchemas()` so the description
+    /// reflects the live `allow_writes` state.
+    public static let schemas: [[String: JSONValue]] = readSchemas + writeSchemas(allowWrites: true)
+
+    /// The read-only tools (always available).
+    public static let readSchemas: [[String: JSONValue]] = [
         [
             "name": .string("uzora_status"),
             "description": .string("Return the agent's current high-level state: uptime, registered probe count, active alert count, and power profile."),
@@ -174,4 +232,60 @@ public struct MCPTools: Sendable {
             ]),
         ],
     ]
+
+    /// The two write tools. Listed regardless of `allowWrites` so clients see
+    /// a stable tool set and get a clear 403 isError when writes are off; the
+    /// description carries the disabled hint.
+    public static func writeSchemas(allowWrites: Bool) -> [[String: JSONValue]] {
+        let gate = allowWrites
+            ? ""
+            : " NOTE: writes are currently DISABLED (set [mcp] allow_writes = true in config.toml); calling this returns an error."
+        return [
+            [
+                "name": .string("uzora_ack_alert"),
+                "description": .string("Acknowledge (dismiss) a currently-firing alert by id. UI-state only — does NOT touch the OS, only hides the alert from the active set until it escalates or clears. Get ids from uzora_list_alerts (the `id` field, e.g. 'disk:/')." + gate),
+                "inputSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "id": .object([
+                            "type": .string("string"),
+                            "description": .string("Alert id to acknowledge, e.g. 'disk:/' or 'cpu_temp:package'."),
+                        ]),
+                    ]),
+                    "required": .array([.string("id")]),
+                ]),
+            ],
+            [
+                "name": .string("uzora_set_probe_config"),
+                "description": .string("Change one probe's configuration (enabled / thresholds / poll interval), persisted to config.toml and hot-reloaded. Threshold units: disk=percent-free, cpu_temp/kernel_task/top_cpu=direct (°C or CPU%), top_mem=GiB, top_net=MiB/s. fan/battery/smart/thermal IGNORE thresholds (enabled + poll only) — a threshold sent to those is not persisted and a warning is returned." + gate),
+                "inputSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "probe": .object([
+                            "type": .string("string"),
+                            "enum": .array(RESTHandlers.knownProbeNames.map { .string($0) }),
+                            "description": .string("Probe to reconfigure (one of the 10 known probe names)."),
+                        ]),
+                        "enabled": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Enable or disable the probe."),
+                        ]),
+                        "warn_threshold": .object([
+                            "type": .string("number"),
+                            "description": .string("Warn threshold in the probe's units (ignored by fan/battery/smart/thermal)."),
+                        ]),
+                        "critical_threshold": .object([
+                            "type": .string("number"),
+                            "description": .string("Critical threshold in the probe's units (ignored by fan/battery/smart/thermal)."),
+                        ]),
+                        "poll_interval_sec": .object([
+                            "type": .string("integer"),
+                            "description": .string("Base poll cadence in seconds (the active power profile still multiplies this)."),
+                        ]),
+                    ]),
+                    "required": .array([.string("probe")]),
+                ]),
+            ],
+        ]
+    }
 }

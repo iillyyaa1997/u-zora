@@ -119,7 +119,7 @@ public struct MCPServer: Sendable {
             return JSONRPCResponse.result(
                 id: envelope.id,
                 result: .object([
-                    "tools": .array(MCPTools.schemas.map { .object($0) }),
+                    "tools": .array(tools.listSchemas().map { .object($0) }),
                 ])
             )
 

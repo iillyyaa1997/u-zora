@@ -51,7 +51,7 @@ struct MCPProtocolTests {
         await server.stop()
     }
 
-    @Test func toolsList_advertisesFiveTools() async throws {
+    @Test func toolsList_advertisesAllTools() async throws {
         let store = StateStore()
         let (port, server) = try await boot(state: store)
         defer { Task { await server.stop() } }
@@ -60,9 +60,15 @@ struct MCPProtocolTests {
         #expect(code == 200)
         let result = json?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
-        #expect(tools?.count == 5)
+        // Five read tools + two write tools (write tools are always listed,
+        // even when allow_writes is off, so clients get a clear 403).
+        #expect(tools?.count == 7)
         let names = Set(tools?.compactMap { $0["name"] as? String } ?? [])
-        #expect(names == ["uzora_status", "uzora_list_alerts", "uzora_list_probes", "uzora_get_metric", "uzora_subscribe"])
+        #expect(names == [
+            "uzora_status", "uzora_list_alerts", "uzora_list_probes",
+            "uzora_get_metric", "uzora_subscribe",
+            "uzora_ack_alert", "uzora_set_probe_config",
+        ])
         await server.stop()
     }
 

@@ -198,9 +198,13 @@ assert_jq   "initialize serverInfo.name"   "$MCP_INIT" '.result.serverInfo.name'
 
 MCP_TOOLS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$BASE/mcp")"
-assert_jq   "tools/list has 5 tools"       "$MCP_TOOLS" '.result.tools | length' '5'
+# 5 read tools + 2 write tools (write tools always listed; allow_writes
+# defaults to true in the harness config).
+assert_jq   "tools/list has 7 tools"       "$MCP_TOOLS" '.result.tools | length' '7'
 assert_contains "tools/list has uzora_status"     "$MCP_TOOLS" 'uzora_status'
 assert_contains "tools/list has uzora_list_alerts" "$MCP_TOOLS" 'uzora_list_alerts'
+assert_contains "tools/list has uzora_ack_alert"   "$MCP_TOOLS" 'uzora_ack_alert'
+assert_contains "tools/list has uzora_set_probe_config" "$MCP_TOOLS" 'uzora_set_probe_config'
 
 MCP_CALL="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"uzora_list_alerts","arguments":{}}}' "$BASE/mcp")"
@@ -245,7 +249,95 @@ else
 fi
 
 # Snapshot the synthetic alert's first_seen for the restart-idempotency check.
+# Captured here (before the ack write below) from the earlier /alerts fetch.
 FIRST_SEEN_BEFORE="$(printf '%s' "$ALERTS" | jq -r '.alerts[] | select(.probe=="synthetic") | .first_seen')"
+
+# ===========================================================================
+# Write operations (Phase 7) — ack + reconfigure. allow_writes defaults true
+# in the harness config, so these succeed; one negative check (unknown probe)
+# verifies the 400 path. The synthetic alert gives a deterministic ack target.
+# ===========================================================================
+section "REST write — POST /alerts/ack"
+ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"id":"synthetic:e2e"}' "$BASE/alerts/ack")"
+assert_jq   "ack returns acknowledged=true" "$ACK" '.acknowledged' 'true'
+assert_jq   "ack echoes id"                 "$ACK" '.id' 'synthetic:e2e'
+# After ack the synthetic alert must vanish from /alerts (hidden, not cleared).
+sleep 1
+ALERTS_ACKED="$(curl -fsS --max-time 3 "$BASE/alerts")"
+assert_jq   "/alerts hides acked synthetic" "$ALERTS_ACKED" '[.alerts[] | select(.probe=="synthetic")] | length' '0'
+# /status reflects the acked count and writes_enabled flag.
+STATUS_ACKED="$(curl -fsS --max-time 3 "$BASE/status")"
+assert_jq   "/status writes_enabled=true"   "$STATUS_ACKED" '.writes_enabled' 'true'
+assert_jq   "/status acked count >= 1"      "$STATUS_ACKED" '.acknowledged_alerts_count >= 1' 'true'
+
+section "REST write — ack unknown id → 404"
+ACK_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -d '{"id":"nope:nothing"}' "$BASE/alerts/ack")"
+[ "$ACK_404_CODE" = "404" ] && pass "ack unknown id returns 404" || fail "ack unknown id returns 404" "got $ACK_404_CODE"
+
+section "MCP write — uzora_ack_alert dispatch"
+# Re-ack the synthetic via MCP (idempotent — still acked → still true).
+MCP_ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"uzora_ack_alert","arguments":{"id":"synthetic:e2e"}}}' "$BASE/mcp")"
+assert_jq   "MCP ack not error"             "$MCP_ACK" '.result.isError' 'false'
+assert_jq   "MCP ack structured ok"         "$MCP_ACK" '.result.structuredContent.acknowledged' 'true'
+
+section "REST write — POST /config/probe (disable then re-enable cpu_temp)"
+# Disable cpu_temp; the hot-reload observer must drop it from the registry.
+DISABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"probe":"cpu_temp","enabled":false}' "$BASE/config/probe")"
+assert_jq   "reconfigure updated=true"      "$DISABLE" '.updated' 'true'
+assert_jq   "reconfigure echoes probe"      "$DISABLE" '.probe' 'cpu_temp'
+assert_jq   "reconfigure persisted enabled=false" "$DISABLE" '.config.enabled' 'false'
+# Wait for the ~150ms watcher debounce + reconfigure to land. A single
+# config write triggers reconfigure via BOTH the direct write-broadcast and
+# the file-watcher reload, and a reconfigure cancels+respawns every probe
+# task — so allow a generous budget (poll up to ~8s).
+DROPPED=0
+for _ in $(seq 1 40); do
+  P="$(curl -fsS --max-time 2 "$BASE/probes" 2>/dev/null || true)"
+  if [ "$(printf '%s' "$P" | jq -r '[.probes[] | select(.name=="cpu_temp")] | length' 2>/dev/null)" = "0" ]; then DROPPED=1; break; fi
+  sleep 0.2
+done
+[ "$DROPPED" = "1" ] && pass "/probes drops cpu_temp after hot-reload" || fail "/probes drops cpu_temp after hot-reload"
+
+# Let the disable's watcher-triggered reload fully drain before the next write
+# so the two reconfigures don't overlap (the file-watcher fires asynchronously
+# after the atomic rename, independent of the direct write-broadcast).
+sleep 1
+
+# Re-enable cpu_temp so config.toml is restored to all-enabled before the
+# restart runs (keeps the probes_registered=11 invariant intact on relaunch).
+ENABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"probe":"cpu_temp","enabled":true}' "$BASE/config/probe")"
+assert_jq   "re-enable updated=true"        "$ENABLE" '.config.enabled' 'true'
+RESTORED=0
+for _ in $(seq 1 50); do
+  P="$(curl -fsS --max-time 2 "$BASE/probes" 2>/dev/null || true)"
+  if [ "$(printf '%s' "$P" | jq -r '[.probes[] | select(.name=="cpu_temp")] | length' 2>/dev/null)" = "1" ]; then RESTORED=1; break; fi
+  sleep 0.2
+done
+if [ "$RESTORED" = "1" ]; then
+  pass "/probes restores cpu_temp after re-enable"
+else
+  DIAG_TOTAL="$(curl -fsS "$BASE/probes" 2>/dev/null | jq -r '.probes | length' 2>/dev/null)"
+  DIAG_CFG="$(grep -A2 'probes.cpu_temp' "$CONFIG_PATH" 2>/dev/null | tr '\n' ' ')"
+  fail "/probes restores cpu_temp after re-enable" "total=$DIAG_TOTAL cfg=[$DIAG_CFG]"
+fi
+
+section "REST write — reconfigure unknown probe → 400"
+BAD_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -d '{"probe":"does_not_exist","enabled":false}' "$BASE/config/probe")"
+[ "$BAD_PROBE_CODE" = "400" ] && pass "unknown-probe reconfigure returns 400" || fail "unknown-probe reconfigure returns 400" "got $BAD_PROBE_CODE"
+
+section "REST write — threshold on fan is rejected (warning, not persisted)"
+FAN_W="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"probe":"fan","warn_threshold":999,"poll_interval_sec":42}' "$BASE/config/probe")"
+assert_jq   "fan reconfigure updated=true"  "$FAN_W" '.updated' 'true'
+assert_jq   "fan threshold not persisted"   "$FAN_W" '.config.warn_threshold // "absent"' 'absent'
+assert_jq   "fan poll override applied"      "$FAN_W" '.config.poll_interval_sec' '42'
+assert_jq   "fan reconfigure has warning"    "$FAN_W" '.warnings | length >= 1' 'true'
 
 section "Graceful shutdown"
 kill "$APP_PID" 2>/dev/null

@@ -68,9 +68,16 @@ public struct HTTPConfig: Sendable, Codable, Equatable {
 
 public struct MCPConfig: Sendable, Codable, Equatable {
     public var enabled: Bool
+    /// Global write gate for the bridge (Phase 7). When `true` (the default —
+    /// loopback-only personal use) the write endpoints/tools (`uzora_ack_alert`,
+    /// `uzora_set_probe_config`, `POST /alerts/ack`, `POST /config/probe`) are
+    /// live. When `false` they all return 403 / MCP isError. Lightweight
+    /// precursor to real per-client auth.
+    public var allowWrites: Bool
 
-    public init(enabled: Bool = true) {
+    public init(enabled: Bool = true, allowWrites: Bool = true) {
         self.enabled = enabled
+        self.allowWrites = allowWrites
     }
 }
 
@@ -215,6 +222,7 @@ extension UZoraConfig {
             ])),
             ("mcp", .table([
                 ("enabled", .bool(mcp.enabled)),
+                ("allow_writes", .bool(mcp.allowWrites)),
             ])),
             ("notifications", .table([
                 ("banner_severity_floor", .string(notifications.bannerSeverityFloor.rawValue)),
@@ -263,6 +271,7 @@ extension UZoraConfig {
 
         if let m = toml.value(forKey: "mcp") {
             if let v = m.value(forKey: "enabled")?.asBool { c.mcp.enabled = v }
+            if let v = m.value(forKey: "allow_writes")?.asBool { c.mcp.allowWrites = v }
         }
 
         if let n = toml.value(forKey: "notifications") {

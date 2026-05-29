@@ -32,7 +32,9 @@ public actor ChannelHost {
         state: StateStore,
         jsonl: JSONLEventSink,
         eventBus: EventBus,
-        metrics: MetricsStore? = nil
+        metrics: MetricsStore? = nil,
+        configLoader: ConfigLoader? = nil,
+        allowWrites: Bool = true
     ) {
         self.port = port
         self.state = state
@@ -41,7 +43,12 @@ public actor ChannelHost {
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
-        let rest = RESTHandlers(state: state, metricsStore: metrics)
+        let rest = RESTHandlers(
+            state: state,
+            metricsStore: metrics,
+            configLoader: configLoader,
+            allowWrites: allowWrites
+        )
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus)
         self.mcp = MCPServer(tools: MCPTools(
@@ -117,6 +124,16 @@ public actor ChannelHost {
         }
         await httpServer.register(method: "POST", path: "/mcp") { req in
             await mcp.handle(req)
+        }
+        // Write endpoints (Phase 7). Both take their identifier in the JSON
+        // body, not the URL path, because alert ids (`disk:/`) and the exact-
+        // match router don't mix. Both go through `rest.dispatch` so REST and
+        // MCP share one code path + one `allow_writes` gate.
+        await httpServer.register(method: "POST", path: "/alerts/ack") { req in
+            await rest.dispatch(req)
+        }
+        await httpServer.register(method: "POST", path: "/config/probe") { req in
+            await rest.dispatch(req)
         }
         await httpServer.registerStreaming(method: "GET", path: "/stream") { req, sink in
             await sse.handle(request: req, sink: sink)

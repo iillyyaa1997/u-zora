@@ -53,6 +53,13 @@ public actor StateStore {
 
     private let startedAt: Date
     private var activeAlertsByID: [Alert.ID: Alert] = [:]
+    /// IDs of alerts the user (or an LLM via the bridge) has acknowledged.
+    /// An acked id is hidden from `activeAlerts()` / `activeAlerts(minSeverity:)`
+    /// — and therefore from /alerts, /status counts, the popover, and MCP —
+    /// but the alert itself stays in `activeAlertsByID` so an escalation can
+    /// re-surface it (the ack is cleared on `.escalated`) and a clear can
+    /// retire it cleanly (the ack is dropped on `.cleared`).
+    private var acknowledgedIDs: Set<Alert.ID> = []
     private var recentEvents: [RecordedEvent] = []
     private var probes: [String: ProbeInfo] = [:]
     private var powerState: String = "—"
@@ -86,11 +93,32 @@ public actor StateStore {
         switch event {
         case .appeared(let alert):
             activeAlertsByID[alert.id] = alert
+            // A fresh `appeared` means any prior ack is stale (the alert had
+            // cleared and come back, or is brand-new). Clear it so the new
+            // instance surfaces.
+            acknowledgedIDs.remove(alert.id)
         case .escalated(let alert, _):
             activeAlertsByID[alert.id] = alert
+            // Escalation re-surfaces an acked alert: the situation got worse,
+            // so the prior acknowledgement no longer applies.
+            acknowledgedIDs.remove(alert.id)
         case .cleared(let id):
             activeAlertsByID.removeValue(forKey: id)
+            // The alert is gone; drop the ack so a future re-appearance is a
+            // fresh, unacknowledged alert.
+            acknowledgedIDs.remove(id)
         }
+    }
+
+    /// Acknowledge a currently-firing alert by id. UI-state only — this does
+    /// NOT touch the OS, only hides the alert from the active set until it
+    /// escalates or clears. Returns `false` if no active alert has that id
+    /// (already cleared, never existed, or already acknowledged-then-cleared).
+    @discardableResult
+    public func acknowledge(_ id: Alert.ID) -> Bool {
+        guard activeAlertsByID[id] != nil else { return false }
+        acknowledgedIDs.insert(id)
+        return true
     }
 
     /// Replace the registered probe roster (called at boot from
@@ -112,13 +140,29 @@ public actor StateStore {
     }
 
     /// Snapshot the active alert set sorted by id for stable output.
+    /// Acknowledged alerts are excluded — they remain tracked internally so
+    /// an escalation can re-surface them, but every read surface (/alerts,
+    /// /status count, popover, MCP) sees only the un-acked set.
     public func activeAlerts() -> [Alert] {
-        activeAlertsByID.values.sorted { $0.id < $1.id }
+        activeAlertsByID.values
+            .filter { !acknowledgedIDs.contains($0.id) }
+            .sorted { $0.id < $1.id }
     }
 
-    /// Filtered view: alerts at or above the supplied severity.
+    /// Filtered view: alerts at or above the supplied severity. Inherits the
+    /// acknowledged-alert exclusion from `activeAlerts()`.
     public func activeAlerts(minSeverity floor: Severity) -> [Alert] {
         activeAlerts().filter { $0.severity >= floor }
+    }
+
+    /// Number of currently-acknowledged alerts that are still firing
+    /// (acked-and-hidden but not yet cleared/escalated). Cheap O(n) count
+    /// over the active set so a stale ack (whose alert already cleared) is
+    /// never counted.
+    public func acknowledgedCount() -> Int {
+        activeAlertsByID.keys.reduce(into: 0) { acc, id in
+            if acknowledgedIDs.contains(id) { acc += 1 }
+        }
     }
 
     /// Snapshot the registered probes (stable sorted-by-name order).

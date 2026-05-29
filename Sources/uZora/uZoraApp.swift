@@ -25,12 +25,28 @@ struct uZoraApp: App {
     }
 }
 
+/// Resolve a SwiftUI `Locale` from the config value:
+/// `"system"` → no override (returns `Locale.current` so xcstrings falls
+/// back to the system preferred languages); explicit `"en"` / `"ru"` /
+/// any BCP-47 tag forces that locale's String Catalog entries.
+private func resolveLocale(from configValue: String) -> Locale {
+    if configValue == "system" || configValue.isEmpty {
+        return Locale.current
+    }
+    return Locale(identifier: configValue)
+}
+
 private struct PopoverGate: View {
     @ObservedObject var appDelegate: AppDelegate
     var body: some View {
         if let bindings = appDelegate.bindings {
             PopoverView(state: appDelegate.uiState)
                 .environmentObject(bindings)
+                // Re-render the popover when the user picks a different
+                // language in Settings — bindings is an ObservableObject,
+                // so changing config.general.language re-evaluates this
+                // body and applies the new locale to all child views.
+                .environment(\.locale, resolveLocale(from: bindings.current.general.language))
         } else {
             ProgressView()
                 .frame(width: 200, height: 100)
@@ -43,6 +59,7 @@ private struct SettingsGate: View {
     var body: some View {
         if let bindings = appDelegate.bindings {
             SettingsView(bindings: bindings, state: appDelegate.uiState)
+                .environment(\.locale, resolveLocale(from: bindings.current.general.language))
         } else {
             ProgressView()
         }
@@ -231,6 +248,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let persistedAlerts = Array(await watchdog.snapshot().values)
         if !persistedAlerts.isEmpty {
             await stateStore.seedActiveAlerts(persistedAlerts)
+            // Also mirror into UIState so popover shows restored alerts
+            // immediately on launch (event-bus subscription only fires on
+            // transitions; idempotent re-runs emit nothing).
+            uiState.apply(activeAlerts: persistedAlerts)
         }
         self.registry = registry
         self.bus = eventBus

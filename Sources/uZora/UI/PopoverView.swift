@@ -11,6 +11,7 @@ import AppKit
 /// from per-metric ring buffers maintained on the same object.
 struct PopoverView: View {
     @ObservedObject var state: UIState
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -163,7 +164,14 @@ struct PopoverView: View {
                 Spacer()
             }
             HStack {
-                SettingsLink {
+                Button {
+                    // LSUIElement apps don't auto-activate when their
+                    // Settings scene opens — the window appears behind the
+                    // current app. Force activation then trigger the
+                    // SwiftUI Settings opener (macOS 14+).
+                    NSApp.activate(ignoringOtherApps: true)
+                    openSettings()
+                } label: {
                     Text(String(localized: "Open Settings…", defaultValue: "Open Settings…"))
                 }
                 Spacer()

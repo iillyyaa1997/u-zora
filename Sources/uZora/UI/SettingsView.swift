@@ -63,13 +63,31 @@ private struct GeneralTab: View {
 
                 Picker(String(localized: "Language", defaultValue: "Language"), selection: Binding(
                     get: { bindings.current.general.language },
-                    set: { v in bindings.update { $0.general.language = v } }
+                    set: { v in
+                        bindings.update { $0.general.language = v }
+                        // Foundation's Bundle reads AppleLanguages early
+                        // and caches localizations. To make the change
+                        // stick we have to write the override here and
+                        // ask the user to restart — the on-screen note
+                        // below explains.
+                        if v == "system" {
+                            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                        } else {
+                            UserDefaults.standard.set([v], forKey: "AppleLanguages")
+                        }
+                    }
                 )) {
                     Text(String(localized: "System", defaultValue: "System")).tag("system")
                     Text("English").tag("en")
                     Text("Русский").tag("ru")
                 }
                 .pickerStyle(.menu)
+                Text(String(
+                    localized: "Restart uZora to apply language change.",
+                    defaultValue: "Restart uZora to apply language change."
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
                 Picker(String(localized: "Theme", defaultValue: "Theme"), selection: Binding(
                     get: { bindings.current.general.theme },

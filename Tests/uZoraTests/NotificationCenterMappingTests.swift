@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-import UserNotifications
+@preconcurrency import UserNotifications  // cross-SDK Sendable gap (see NotificationCenter.swift)
 @testable import uZora
 
 @Suite("NotificationCenter event → content mapping")

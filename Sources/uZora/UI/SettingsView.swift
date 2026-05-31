@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
-import UserNotifications
+@preconcurrency import UserNotifications  // see NotificationCenter.swift — cross-SDK Sendable gap
 
 /// Full Settings scene. Tabs: General / Probes / Notifications /
 /// MCP & API / Logs. Each control is two-way bound to the live

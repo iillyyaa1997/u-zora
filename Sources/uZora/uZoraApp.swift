@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import UserNotifications
+@preconcurrency import UserNotifications  // see NotificationCenter.swift — cross-SDK Sendable gap
 import os
 
 @main

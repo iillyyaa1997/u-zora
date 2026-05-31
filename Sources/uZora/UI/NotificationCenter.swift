@@ -1,5 +1,13 @@
 import Foundation
-import UserNotifications
+// @preconcurrency: UNUserNotificationCenter / UNNotificationRequest gained
+// Sendable + actor-isolation annotations in the macOS 26 SDK but NOT the 15
+// SDK. Without this, `await center.requestAuthorization(...)` / `center.add(req)`
+// from this @MainActor class compile cleanly on a 26-SDK toolchain yet fail
+// with "sending 'self.center'/'req' risks causing data races" on the
+// macos-15 CI runner. @preconcurrency suppresses those module-origin Sendable
+// diagnostics on the older SDK and is a no-op on 26 — the idiomatic portable
+// fix for cross-SDK gradual-concurrency gaps.
+@preconcurrency import UserNotifications
 import AppKit
 import os
 

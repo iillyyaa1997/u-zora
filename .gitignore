@@ -6,3 +6,6 @@ DerivedData/
 .DS_Store
 *.xcuserstate
 xcuserdata/
+
+# Internal dev handoff (not for the public release)
+HANDOFF.md

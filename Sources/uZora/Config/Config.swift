@@ -13,6 +13,8 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
     public var probes: ProbesConfig
     public var notifications: NotificationsConfig
     public var powerProfiles: PowerProfilesConfig
+    /// Q10 auto-actions — per-action opt-in + global safety knobs.
+    public var actions: ActionsConfig
 
     public init(
         general: GeneralConfig = GeneralConfig(),
@@ -20,7 +22,8 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         mcp: MCPConfig = MCPConfig(),
         probes: ProbesConfig = ProbesConfig(),
         notifications: NotificationsConfig = NotificationsConfig(),
-        powerProfiles: PowerProfilesConfig = PowerProfilesConfig()
+        powerProfiles: PowerProfilesConfig = PowerProfilesConfig(),
+        actions: ActionsConfig = ActionsConfig()
     ) {
         self.general = general
         self.http = http
@@ -28,6 +31,7 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         self.probes = probes
         self.notifications = notifications
         self.powerProfiles = powerProfiles
+        self.actions = actions
     }
 
     public static let `default` = UZoraConfig()
@@ -224,6 +228,132 @@ public struct PowerProfileOverride: Sendable, Codable, Equatable {
     }
 }
 
+// MARK: - Actions (Q10 auto-actions)
+
+/// Per-action config: opt-in auto-run flag (Q3 — default OFF for every
+/// action) plus an optional override of the default alert binding (Q6
+/// hybrid). All fields default to "safe / use built-in mapping".
+public struct ActionOverride: Sendable, Codable, Equatable {
+    /// Opt-in to FULLY-AUTOMATIC execution. Default `false` for every
+    /// action (Q3). The notification "Run" button (confirmed trigger) works
+    /// regardless of this flag — the user is clicking it themselves.
+    public var autoEnabled: Bool
+    /// Override which probe fires this action (nil → descriptor default,
+    /// `"disk"`). Q6 config-override.
+    public var probe: String?
+    /// Override the minimum severity that makes this action eligible
+    /// (nil → descriptor default, `.warn`). Q6 config-override.
+    public var severityFloor: Severity?
+
+    public init(
+        autoEnabled: Bool = false,
+        probe: String? = nil,
+        severityFloor: Severity? = nil
+    ) {
+        self.autoEnabled = autoEnabled
+        self.probe = probe
+        self.severityFloor = severityFloor
+    }
+}
+
+/// `[actions]` config section: per-action opt-in + the global PolicyEngine
+/// safety knobs. Every safety mechanism is a toggle + params (Q4) EXCEPT
+/// the audit log, which is always-on and therefore has no toggle here.
+///
+/// Defaults (Q4): cool_down_minutes=30, rate_limit_per_hour=6,
+/// power_gate=true (skip auto on battery), focus_gate=true,
+/// dry_run_preview=true. Every action `auto_enabled=false` (Q3).
+public struct ActionsConfig: Sendable, Codable, Equatable {
+    // ── Per-action opt-in (one field per MVP action; the descriptor table
+    //    below is the single source of truth for the id ↔ field mapping). ──
+    public var pruneApfsSnapshots: ActionOverride
+    public var clearDerivedData: ActionOverride
+    public var brewCleanup: ActionOverride
+    public var clearUserCaches: ActionOverride
+
+    // ── Global safety toggles + params (each configurable, Q4). ──
+    /// Cool-down toggle (don't repeat the same action within N minutes).
+    public var coolDownEnabled: Bool
+    /// Cool-down window in minutes. Sanitized into a sane range.
+    public var coolDownMinutes: Int
+    /// Rate-limit toggle (cap auto-runs per rolling hour).
+    public var rateLimitEnabled: Bool
+    /// Max auto-runs per rolling hour. Sanitized into a sane range.
+    public var rateLimitPerHour: Int
+    /// Power gate: skip AUTO actions while on battery (confirmed runs are
+    /// unaffected). Default true.
+    public var powerGate: Bool
+    /// Focus gate: skip AUTO actions while Focus is active. Default true.
+    public var focusGate: Bool
+    /// Compute + surface a dry-run preview before executing. Default true.
+    public var dryRunPreview: Bool
+
+    public init(
+        pruneApfsSnapshots: ActionOverride = ActionOverride(),
+        clearDerivedData: ActionOverride = ActionOverride(),
+        brewCleanup: ActionOverride = ActionOverride(),
+        clearUserCaches: ActionOverride = ActionOverride(),
+        coolDownEnabled: Bool = true,
+        coolDownMinutes: Int = 30,
+        rateLimitEnabled: Bool = true,
+        rateLimitPerHour: Int = 6,
+        powerGate: Bool = true,
+        focusGate: Bool = true,
+        dryRunPreview: Bool = true
+    ) {
+        self.pruneApfsSnapshots = pruneApfsSnapshots
+        self.clearDerivedData = clearDerivedData
+        self.brewCleanup = brewCleanup
+        self.clearUserCaches = clearUserCaches
+        self.coolDownEnabled = coolDownEnabled
+        self.coolDownMinutes = coolDownMinutes
+        self.rateLimitEnabled = rateLimitEnabled
+        self.rateLimitPerHour = rateLimitPerHour
+        self.powerGate = powerGate
+        self.focusGate = focusGate
+        self.dryRunPreview = dryRunPreview
+    }
+
+    /// One descriptor per config-known action — the SINGLE source of truth
+    /// for the action-id ↔ `ActionOverride` field mapping (mirrors
+    /// `ProbesConfig.descriptors`). Every other site derives from this
+    /// table rather than re-listing the four ids.
+    ///
+    /// `@unchecked Sendable`: same rationale as `ProbesConfig.ProbeDescriptor`
+    /// — each `WritableKeyPath` is a compile-time-constant path into a stored
+    /// property of the `Sendable` value type, immutable + safe to share.
+    public struct ActionDescriptorKey: @unchecked Sendable {
+        public let id: String
+        public let path: WritableKeyPath<ActionsConfig, ActionOverride>
+    }
+
+    /// The four MVP action ids in canonical order.
+    public static let descriptors: [ActionDescriptorKey] = [
+        ActionDescriptorKey(id: "prune_apfs_snapshots", path: \.pruneApfsSnapshots),
+        ActionDescriptorKey(id: "clear_derived_data",   path: \.clearDerivedData),
+        ActionDescriptorKey(id: "brew_cleanup",         path: \.brewCleanup),
+        ActionDescriptorKey(id: "clear_user_caches",    path: \.clearUserCaches),
+    ]
+
+    /// Descriptor for an action id, or nil if unknown.
+    public static func descriptor(for id: String) -> ActionDescriptorKey? {
+        descriptors.first { $0.id == id }
+    }
+
+    /// Read an action's override by id via the descriptor table.
+    public subscript(id id: String) -> ActionOverride? {
+        guard let d = Self.descriptor(for: id) else { return nil }
+        return self[keyPath: d.path]
+    }
+
+    /// Write an action's override by id via the descriptor table (no-op for
+    /// an unknown id).
+    public mutating func setOverride(_ o: ActionOverride, for id: String) {
+        guard let d = Self.descriptor(for: id) else { return }
+        self[keyPath: d.path] = o
+    }
+}
+
 public struct PowerProfilesConfig: Sendable, Codable, Equatable {
     public var acOpen: PowerProfileOverride
     public var acClosed: PowerProfileOverride
@@ -303,6 +433,19 @@ extension UZoraConfig {
                 ("battery_closed", powerProfiles.batteryClosed.toTOMLValue()),
                 ("focus", powerProfiles.focus.toTOMLValue()),
             ])),
+            ("actions", .table([
+                ("cool_down_enabled", .bool(actions.coolDownEnabled)),
+                ("cool_down_minutes", .integer(Int64(actions.coolDownMinutes))),
+                ("rate_limit_enabled", .bool(actions.rateLimitEnabled)),
+                ("rate_limit_per_hour", .integer(Int64(actions.rateLimitPerHour))),
+                ("power_gate", .bool(actions.powerGate)),
+                ("focus_gate", .bool(actions.focusGate)),
+                ("dry_run_preview", .bool(actions.dryRunPreview)),
+                ("prune_apfs_snapshots", actions.pruneApfsSnapshots.toTOMLValue()),
+                ("clear_derived_data", actions.clearDerivedData.toTOMLValue()),
+                ("brew_cleanup", actions.brewCleanup.toTOMLValue()),
+                ("clear_user_caches", actions.clearUserCaches.toTOMLValue()),
+            ])),
         ])
     }
 
@@ -360,6 +503,28 @@ extension UZoraConfig {
             c.powerProfiles.focus = PowerProfileOverride(toml: pp.value(forKey: "focus"))
         }
 
+        if let a = toml.value(forKey: "actions") {
+            if let v = a.value(forKey: "cool_down_enabled")?.asBool { c.actions.coolDownEnabled = v }
+            // Numeric safety params are clamped at the READ boundary so a
+            // hand-edited config can't disable safety by overflow / negative
+            // (ConfigSanitizer logs + coerces). The write boundary validates
+            // separately.
+            if let v = a.value(forKey: "cool_down_minutes")?.asInt {
+                c.actions.coolDownMinutes = ConfigSanitizer.clampCoolDownMinutes(Int(v))
+            }
+            if let v = a.value(forKey: "rate_limit_enabled")?.asBool { c.actions.rateLimitEnabled = v }
+            if let v = a.value(forKey: "rate_limit_per_hour")?.asInt {
+                c.actions.rateLimitPerHour = ConfigSanitizer.clampRateLimitPerHour(Int(v))
+            }
+            if let v = a.value(forKey: "power_gate")?.asBool { c.actions.powerGate = v }
+            if let v = a.value(forKey: "focus_gate")?.asBool { c.actions.focusGate = v }
+            if let v = a.value(forKey: "dry_run_preview")?.asBool { c.actions.dryRunPreview = v }
+            c.actions.pruneApfsSnapshots = ActionOverride(toml: a.value(forKey: "prune_apfs_snapshots"))
+            c.actions.clearDerivedData = ActionOverride(toml: a.value(forKey: "clear_derived_data"))
+            c.actions.brewCleanup = ActionOverride(toml: a.value(forKey: "brew_cleanup"))
+            c.actions.clearUserCaches = ActionOverride(toml: a.value(forKey: "clear_user_caches"))
+        }
+
         self = c
     }
 }
@@ -402,6 +567,29 @@ extension PowerProfileOverride {
         var entries: [(String, TOMLValue)] = []
         if let m = pollMultiplier { entries.append(("poll_multiplier", .double(m))) }
         if let s = alertSeverityFloor { entries.append(("alert_severity_floor", .string(s.rawValue))) }
+        return .table(entries)
+    }
+}
+
+extension ActionOverride {
+    public init(toml: TOMLValue?) {
+        var o = ActionOverride()
+        guard let t = toml else { self = o; return }
+        if let v = t.value(forKey: "auto_enabled")?.asBool { o.autoEnabled = v }
+        if let v = t.value(forKey: "probe")?.asString, !v.isEmpty { o.probe = v }
+        if let v = t.value(forKey: "severity_floor")?.asString,
+           let sev = Severity(rawValue: v) {
+            o.severityFloor = sev
+        }
+        self = o
+    }
+
+    public func toTOMLValue() -> TOMLValue {
+        var entries: [(String, TOMLValue)] = [
+            ("auto_enabled", .bool(autoEnabled)),
+        ]
+        if let p = probe { entries.append(("probe", .string(p))) }
+        if let s = severityFloor { entries.append(("severity_floor", .string(s.rawValue))) }
         return .table(entries)
     }
 }

@@ -22,6 +22,7 @@ struct PopoverView: View {
                     activeAlertsSection
                     systemOverviewSection
                     topProcessesSection
+                    recentActionsSection
                 }
                 .padding(.horizontal, 12)
             }
@@ -151,6 +152,56 @@ struct PopoverView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Recent actions (Q10)
+
+    private var recentActionsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !state.recentActions.isEmpty {
+                Text(String(localized: "Recent actions", defaultValue: "Recent actions"))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                ForEach(Array(state.recentActions.suffix(3).reversed().enumerated()), id: \.offset) { (_, entry) in
+                    HStack(spacing: 6) {
+                        Image(systemName: recentIcon(entry))
+                            .foregroundStyle(recentColor(entry))
+                            .font(.caption2)
+                            .frame(width: 12)
+                        Text(entry.actionID)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text(recentTrailing(entry))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+    }
+
+    private func recentIcon(_ e: AuditLog.Entry) -> String {
+        if e.error != nil { return "xmark.circle.fill" }
+        if e.policyDecision.hasPrefix("deny") { return "hand.raised.fill" }
+        if e.skipped { return "minus.circle.fill" }
+        return "checkmark.circle.fill"
+    }
+    private func recentColor(_ e: AuditLog.Entry) -> Color {
+        if e.error != nil { return .red }
+        if e.policyDecision.hasPrefix("deny") { return .orange }
+        if e.skipped { return .secondary }
+        return .green
+    }
+    private func recentTrailing(_ e: AuditLog.Entry) -> String {
+        if e.policyDecision.hasPrefix("deny") { return String(localized: "blocked", defaultValue: "blocked") }
+        if e.error != nil { return String(localized: "failed", defaultValue: "failed") }
+        if e.skipped { return "—" }
+        let mb = Double(e.freedBytes) / 1_048_576.0
+        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024) }
+        return String(format: "%.0f MB", mb)
     }
 
     // MARK: - Footer

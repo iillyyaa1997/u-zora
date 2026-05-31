@@ -30,14 +30,37 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
 
     public typealias EventHandler = @MainActor @Sendable (WatchdogEvent) async -> Void
 
+    /// Handler invoked when the user taps a real-action "Run" button in a
+    /// notification. Receives the alert's probe + severity so the
+    /// `ActionRunner` can resolve the mapped action(s) and run them with
+    /// `trigger: .confirmed`. Wired by `uZoraApp.bootstrap`.
+    public typealias RunActionHandler = @Sendable (_ probe: String, _ severity: Severity) async -> Void
+
     private let center: UNUserNotificationCenter
     private var categoriesInstalled: Bool = false
+    /// Q10: closure that runs the confirmed action(s) for a probe/severity.
+    private var runActionHandler: RunActionHandler?
+    /// Q10: probes that currently have at least one mapped action — only
+    /// these categories carry a "Run" button. Populated from the
+    /// ActionRegistry mapping at wire time (MVP: just "disk").
+    private var actionableProbes: Set<String> = []
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "notifications")
 
     public override init() {
         self.center = UNUserNotificationCenter.current()
         super.init()
         self.center.delegate = self
+    }
+
+    /// Wire the Q10 real-action button: which probes get a "Run" action and
+    /// the closure to execute it. Re-installs categories so the new action
+    /// button appears. Idempotent-safe.
+    public func wireRunAction(actionableProbes: Set<String>, handler: @escaping RunActionHandler) {
+        self.actionableProbes = actionableProbes
+        self.runActionHandler = handler
+        // Force a category re-install so the "Run" buttons are registered.
+        self.categoriesInstalled = false
+        installCategories()
     }
 
     /// Request authorization (banner, sound, alert). Idempotent — the
@@ -53,22 +76,44 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
         installCategories()
     }
 
-    /// Build categories for each probe so notifications can carry a single
-    /// reversible action button.
+    /// Stable identifier prefix for the Q10 real-action "Run" button. The
+    /// per-probe id is `uzora.act.run.<probe>` so the delegate can tell a
+    /// "Run cleanup" tap from the legacy "open a tool" tap.
+    public static let runActionIDPrefix = "uzora.act.run."
+
+    /// Build categories for each probe. Each carries the legacy "open a
+    /// tool" action; probes with at least one mapped Q10 action ALSO carry a
+    /// "Run cleanup" real-action button (Q7).
     private func installCategories() {
         guard !categoriesInstalled else { return }
         categoriesInstalled = true
+        let runTitle = String(localized: "Run cleanup", defaultValue: "Run cleanup")
         let categories: Set<UNNotificationCategory> = Set(
             NotificationActionMap.allCategories.map { entry in
-                UNNotificationCategory(
-                    identifier: entry.categoryID,
-                    actions: [
+                var actions: [UNNotificationAction] = [
+                    UNNotificationAction(
+                        identifier: entry.actionID,
+                        title: entry.actionTitle,
+                        options: [.foreground]
+                    )
+                ]
+                // Add the real-action "Run" button only for probes that have
+                // a mapped, runnable action (MVP: disk). The button itself is
+                // NOT foreground — running cleanup shouldn't yank the user
+                // into the app — and the actual policy gating (reversibility +
+                // audit) happens in the ActionRunner with trigger=confirmed.
+                if actionableProbes.contains(entry.probeName) {
+                    actions.append(
                         UNNotificationAction(
-                            identifier: entry.actionID,
-                            title: entry.actionTitle,
-                            options: [.foreground]
+                            identifier: Self.runActionIDPrefix + entry.probeName,
+                            title: runTitle,
+                            options: []
                         )
-                    ],
+                    )
+                }
+                return UNNotificationCategory(
+                    identifier: entry.categoryID,
+                    actions: actions,
                     intentIdentifiers: [],
                     options: []
                 )
@@ -175,13 +220,33 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
         completionHandler([.banner, .sound, .list])
     }
 
-    /// Handle a tap on the action button — open the target URL.
+    /// Handle a tap on a notification action button.
+    ///
+    /// - The Q10 "Run cleanup" real-action (`uzora.act.run.<probe>`) routes to
+    ///   the `runActionHandler` with the alert's probe + severity, which runs
+    ///   the mapped action(s) through the ActionRunner with
+    ///   `trigger: .confirmed` (the user explicitly clicked).
+    /// - Any other action (legacy "open a tool" + the default body tap) opens
+    ///   the category's target URL.
     public func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
+        let actionID = response.actionIdentifier
+
+        if actionID.hasPrefix(Self.runActionIDPrefix), let handler = runActionHandler {
+            let probe = (userInfo["probe"] as? String)
+                ?? String(actionID.dropFirst(Self.runActionIDPrefix.count))
+            let severity = (userInfo["severity"] as? String).flatMap { Severity(rawValue: $0) } ?? .warn
+            Task {
+                await handler(probe, severity)
+                completionHandler()
+            }
+            return
+        }
+
         if let urlString = userInfo["action_target"] as? String,
            let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
@@ -197,6 +262,10 @@ public struct NotificationActionMap: Sendable {
     public let actionID: String
     public let actionTitle: String
     public let targetURL: URL
+    /// The probe name this category is for — used to attach the Q10 "Run"
+    /// real-action button to the right categories + resolve the action(s)
+    /// on tap.
+    public let probeName: String
 
     public static let allCategories: [NotificationActionMap] = [
         .disk, .topCPU, .topMem, .topNet, .kernelTask,
@@ -232,66 +301,77 @@ public struct NotificationActionMap: Sendable {
         categoryID: "uzora.cat.disk",
         actionID: "uzora.act.disk",
         actionTitle: String(localized: "Show Disk Usage", defaultValue: "Show Disk Usage"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Disk Utility.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Disk Utility.app"),
+        probeName: "disk"
     )
     public static let topCPU = NotificationActionMap(
         categoryID: "uzora.cat.topcpu",
         actionID: "uzora.act.topcpu",
         actionTitle: String(localized: "Open Activity Monitor", defaultValue: "Open Activity Monitor"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "top_cpu"
     )
     public static let topMem = NotificationActionMap(
         categoryID: "uzora.cat.topmem",
         actionID: "uzora.act.topmem",
         actionTitle: String(localized: "Open Activity Monitor", defaultValue: "Open Activity Monitor"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "top_mem"
     )
     public static let topNet = NotificationActionMap(
         categoryID: "uzora.cat.topnet",
         actionID: "uzora.act.topnet",
         actionTitle: String(localized: "Open Activity Monitor", defaultValue: "Open Activity Monitor"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "top_net"
     )
     public static let kernelTask = NotificationActionMap(
         categoryID: "uzora.cat.kerneltask",
         actionID: "uzora.act.kerneltask",
         actionTitle: String(localized: "Open Activity Monitor", defaultValue: "Open Activity Monitor"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "kernel_task"
     )
     public static let battery = NotificationActionMap(
         categoryID: "uzora.cat.battery",
         actionID: "uzora.act.battery",
         actionTitle: String(localized: "Open Battery Settings", defaultValue: "Open Battery Settings"),
-        targetURL: URL(string: "x-apple.systempreferences:com.apple.preference.battery")!
+        targetURL: URL(string: "x-apple.systempreferences:com.apple.preference.battery")!,
+        probeName: "battery"
     )
     public static let cpuTemp = NotificationActionMap(
         categoryID: "uzora.cat.cputemp",
         actionID: "uzora.act.cputemp",
         actionTitle: String(localized: "Show Thermal Report", defaultValue: "Show Thermal Report"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/System Information.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/System Information.app"),
+        probeName: "cpu_temp"
     )
     public static let thermal = NotificationActionMap(
         categoryID: "uzora.cat.thermal",
         actionID: "uzora.act.thermal",
         actionTitle: String(localized: "Show Thermal Report", defaultValue: "Show Thermal Report"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "thermal"
     )
     public static let fan = NotificationActionMap(
         categoryID: "uzora.cat.fan",
         actionID: "uzora.act.fan",
         actionTitle: String(localized: "Show Thermal Report", defaultValue: "Show Thermal Report"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "fan"
     )
     public static let smart = NotificationActionMap(
         categoryID: "uzora.cat.smart",
         actionID: "uzora.act.smart",
         actionTitle: String(localized: "Open System Information", defaultValue: "Open System Information"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/System Information.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/System Information.app"),
+        probeName: "smart"
     )
     public static let generic = NotificationActionMap(
         categoryID: "uzora.cat.generic",
         actionID: "uzora.act.generic",
         actionTitle: String(localized: "Show Details", defaultValue: "Show Details"),
-        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "generic"
     )
 }

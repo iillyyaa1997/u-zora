@@ -30,6 +30,10 @@ public struct SettingsView: View {
                 .tabItem {
                     Label(String(localized: "Notifications", defaultValue: "Notifications"), systemImage: "bell.badge")
                 }
+            ActionsTab(bindings: bindings, state: state)
+                .tabItem {
+                    Label(String(localized: "Actions", defaultValue: "Actions"), systemImage: "bolt.badge.automatic")
+                }
             APITab(bindings: bindings, state: state)
                 .tabItem {
                     Label(String(localized: "MCP & API", defaultValue: "MCP & API"), systemImage: "network")
@@ -342,6 +346,217 @@ private struct NotificationsTab: View {
         content.interruptionLevel = .active
         let req = UNNotificationRequest(identifier: "uzora.test.\(Date().timeIntervalSince1970)", content: content, trigger: nil)
         try? await center.add(req)
+    }
+}
+
+// MARK: - Actions tab (Q10 auto-actions)
+
+private struct ActionsTab: View {
+    @ObservedObject var bindings: ConfigBindings
+    @ObservedObject var state: UIState
+
+    /// Display metadata + a key-path into ActionsConfig for each action.
+    private struct ActionMeta {
+        let id: String
+        let title: String
+        let detail: String
+        let caution: Bool
+        let path: WritableKeyPath<ActionsConfig, ActionOverride>
+    }
+
+    private static let actionMeta: [ActionMeta] = [
+        ActionMeta(
+            id: "prune_apfs_snapshots",
+            title: String(localized: "Prune local APFS snapshots", defaultValue: "Prune local APFS snapshots"),
+            detail: String(localized: "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). macOS recreates them automatically.", defaultValue: "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). macOS recreates them automatically."),
+            caution: false, path: \.pruneApfsSnapshots
+        ),
+        ActionMeta(
+            id: "clear_derived_data",
+            title: String(localized: "Clear Xcode DerivedData", defaultValue: "Clear Xcode DerivedData"),
+            detail: String(localized: "Remove ~/Library/Developer/Xcode/DerivedData. Xcode rebuilds it on the next build.", defaultValue: "Remove ~/Library/Developer/Xcode/DerivedData. Xcode rebuilds it on the next build."),
+            caution: false, path: \.clearDerivedData
+        ),
+        ActionMeta(
+            id: "brew_cleanup",
+            title: String(localized: "Run brew cleanup", defaultValue: "Run brew cleanup"),
+            detail: String(localized: "Run 'brew cleanup' to remove stale Homebrew downloads. Skipped if Homebrew is not installed.", defaultValue: "Run 'brew cleanup' to remove stale Homebrew downloads. Skipped if Homebrew is not installed."),
+            caution: false, path: \.brewCleanup
+        ),
+        ActionMeta(
+            id: "clear_user_caches",
+            title: String(localized: "Clear user caches", defaultValue: "Clear user caches"),
+            detail: String(localized: "Caution: removes ~/Library/Caches. Some apps store login/session state there and may need to re-authenticate or rebuild settings.", defaultValue: "Caution: removes ~/Library/Caches. Some apps store login/session state there and may need to re-authenticate or rebuild settings."),
+            caution: true, path: \.clearUserCaches
+        ),
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(String(localized: "Auto-actions run reversible cleanup automatically when a disk alert fires. Everything is OFF by default — opt in per action below. The notification “Run cleanup” button works without opting in.", defaultValue: "Auto-actions run reversible cleanup automatically when a disk alert fires. Everything is OFF by default — opt in per action below. The notification “Run cleanup” button works without opting in."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(Self.actionMeta, id: \.id) { meta in
+                    actionCard(meta: meta)
+                }
+
+                safetySection
+                auditSection
+            }
+            .padding()
+        }
+    }
+
+    private func actionCard(meta: ActionMeta) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: Binding(
+                get: { bindings.current.actions[keyPath: meta.path].autoEnabled },
+                set: { v in bindings.update { $0.actions[keyPath: meta.path].autoEnabled = v } }
+            )) {
+                HStack(spacing: 6) {
+                    Text(meta.title).fontWeight(.medium)
+                    if meta.caution {
+                        Text(String(localized: "caution", defaultValue: "caution"))
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.25))
+                            .cornerRadius(4)
+                    }
+                }
+            }
+            Text(meta.detail)
+                .font(.caption)
+                .foregroundStyle(meta.caution ? .orange : .secondary)
+        }
+        .padding()
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    private var safetySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "Safety", defaultValue: "Safety"))
+                .font(.subheadline).fontWeight(.semibold)
+            Toggle(isOn: Binding(
+                get: { bindings.current.actions.powerGate },
+                set: { v in bindings.update { $0.actions.powerGate = v } }
+            )) { Text(String(localized: "Skip auto-actions on battery", defaultValue: "Skip auto-actions on battery")) }
+            Toggle(isOn: Binding(
+                get: { bindings.current.actions.focusGate },
+                set: { v in bindings.update { $0.actions.focusGate = v } }
+            )) { Text(String(localized: "Skip auto-actions during Focus", defaultValue: "Skip auto-actions during Focus")) }
+            Toggle(isOn: Binding(
+                get: { bindings.current.actions.dryRunPreview },
+                set: { v in bindings.update { $0.actions.dryRunPreview = v } }
+            )) { Text(String(localized: "Compute dry-run preview", defaultValue: "Compute dry-run preview")) }
+
+            HStack {
+                Toggle(isOn: Binding(
+                    get: { bindings.current.actions.coolDownEnabled },
+                    set: { v in bindings.update { $0.actions.coolDownEnabled = v } }
+                )) { Text(String(localized: "Cool-down", defaultValue: "Cool-down")) }
+                Stepper(value: Binding(
+                    get: { bindings.current.actions.coolDownMinutes },
+                    set: { v in bindings.update { $0.actions.coolDownMinutes = v } }
+                ), in: ConfigSanitizer.coolDownMinutesRange, step: 5) {
+                    Text("\(bindings.current.actions.coolDownMinutes) " + String(localized: "min", defaultValue: "min"))
+                        .monospacedDigit()
+                }
+                .disabled(!bindings.current.actions.coolDownEnabled)
+            }
+            HStack {
+                Toggle(isOn: Binding(
+                    get: { bindings.current.actions.rateLimitEnabled },
+                    set: { v in bindings.update { $0.actions.rateLimitEnabled = v } }
+                )) { Text(String(localized: "Rate limit", defaultValue: "Rate limit")) }
+                Stepper(value: Binding(
+                    get: { bindings.current.actions.rateLimitPerHour },
+                    set: { v in bindings.update { $0.actions.rateLimitPerHour = v } }
+                ), in: ConfigSanitizer.rateLimitPerHourRange, step: 1) {
+                    Text("\(bindings.current.actions.rateLimitPerHour)/" + String(localized: "hr", defaultValue: "hr"))
+                        .monospacedDigit()
+                }
+                .disabled(!bindings.current.actions.rateLimitEnabled)
+            }
+            Text(String(localized: "The audit log is always on and cannot be disabled.", defaultValue: "The audit log is always on and cannot be disabled."))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding()
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(8)
+    }
+
+    private var auditSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(String(localized: "Audit log", defaultValue: "Audit log"))
+                    .font(.subheadline).fontWeight(.semibold)
+                Spacer()
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([AuditLog.defaultDirectory()])
+                } label: {
+                    Text(String(localized: "Open folder", defaultValue: "Open folder")).font(.caption)
+                }
+                .buttonStyle(.borderless)
+            }
+            if state.recentActions.isEmpty {
+                Text(String(localized: "No actions run yet.", defaultValue: "No actions run yet."))
+                    .font(.caption).foregroundStyle(.tertiary)
+            } else {
+                ForEach(Array(state.recentActions.suffix(10).reversed().enumerated()), id: \.offset) { (_, entry) in
+                    AuditRow(entry: entry)
+                }
+            }
+        }
+        .padding()
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(8)
+    }
+}
+
+private struct AuditRow: View {
+    let entry: AuditLog.Entry
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+                .font(.caption)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack {
+                    Text(entry.actionID).font(.caption).fontWeight(.medium)
+                    Text("(\(entry.trigger.rawValue))").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer()
+                    Text(entry.ts, style: .time).font(.caption2).foregroundStyle(.tertiary)
+                }
+                Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var icon: String {
+        if entry.error != nil { return "xmark.circle.fill" }
+        if entry.policyDecision.hasPrefix("deny") { return "hand.raised.fill" }
+        if entry.skipped { return "minus.circle.fill" }
+        return "checkmark.circle.fill"
+    }
+    private var color: Color {
+        if entry.error != nil { return .red }
+        if entry.policyDecision.hasPrefix("deny") { return .orange }
+        if entry.skipped { return .secondary }
+        return .green
+    }
+    private var subtitle: String {
+        if let e = entry.error { return e }
+        if entry.policyDecision.hasPrefix("deny") { return entry.policyDecision }
+        if entry.skipped { return String(localized: "nothing to do", defaultValue: "nothing to do") }
+        return String(localized: "freed", defaultValue: "freed") + " " + ActionFormat.bytes(entry.freedBytes)
     }
 }
 

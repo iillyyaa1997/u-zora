@@ -138,3 +138,63 @@ enabled = true
 [power_profiles.battery_closed]
 
 [power_profiles.focus]
+
+# ──────────────────────────────────────────────────────────────────────────
+# Auto-actions (Q10) — reversible cleanup uZora can run.
+#
+# Two ways an action runs:
+#   1. CONFIRMED — a notification "Run cleanup" button you click yourself.
+#      Works regardless of the per-action auto_enabled flag below.
+#   2. AUTO      — fully automatic when a mapped alert fires AND you've opted
+#      that action in (auto_enabled = true) AND every safety gate passes.
+#
+# EVERYTHING IS OFF BY DEFAULT. Each action's auto_enabled defaults to false;
+# opt in per action. All four MVP actions are reversible and require no sudo,
+# and are bound to the `disk` alert at warn/critical by default.
+#
+# Safety gate chain (each mechanism is configurable here EXCEPT the audit log,
+# which is always on and cannot be disabled):
+#   reversibility → enabled → power-gate → focus-gate → cool-down → rate-limit
+[actions]
+# Don't repeat the SAME action within this many minutes (anti-flapping).
+cool_down_enabled = true
+cool_down_minutes = 30
+# Cap fully-AUTO runs per rolling hour (confirmed clicks don't count).
+rate_limit_enabled = true
+rate_limit_per_hour = 6
+# Skip AUTO actions while on battery (confirmed clicks still run).
+power_gate = true
+# Skip AUTO actions while a Focus session is active.
+focus_gate = true
+# Compute a dry-run preview (estimated freed bytes) before executing.
+dry_run_preview = true
+
+# Per-action opt-in. Each section accepts:
+#   auto_enabled    (bool, default false) — opt in to FULLY-AUTOMATIC runs.
+#   probe           (string) — override which probe fires this action
+#                              (default "disk"). Q6 config-override.
+#   severity_floor  ("info"|"warn"|"critical") — override the minimum alert
+#                              severity that makes this action eligible
+#                              (default "warn").
+
+# prune_apfs_snapshots — `tmutil deletelocalsnapshots /`. Reversible: macOS
+#   recreates local Time Machine snapshots automatically.
+[actions.prune_apfs_snapshots]
+auto_enabled = false
+# probe = "disk"
+# severity_floor = "warn"
+
+# clear_derived_data — remove ~/Library/Developer/Xcode/DerivedData. Xcode
+#   rebuilds it on the next build.
+[actions.clear_derived_data]
+auto_enabled = false
+
+# brew_cleanup — `brew cleanup`. No-op/skipped if Homebrew is not installed.
+[actions.brew_cleanup]
+auto_enabled = false
+
+# clear_user_caches — remove ~/Library/Caches contents. CAUTION: some apps
+#   store login/session state under Caches and may need to re-authenticate or
+#   rebuild settings after this runs.
+[actions.clear_user_caches]
+auto_enabled = false

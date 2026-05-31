@@ -124,6 +124,10 @@ public final class UIState: ObservableObject {
     @Published public var mcpAlive: Bool = false
     @Published public var jsonlAlive: Bool = false
 
+    /// Q10: recent action audit entries for the popover "Recent actions"
+    /// section. Newest last; mirror of the AuditLog in-memory tail.
+    @Published public var recentActions: [AuditLog.Entry] = []
+
     public var uptimeLabel: String {
         let elapsed = Int(Date().timeIntervalSince(startedAt))
         if elapsed < 60 { return "uptime \(elapsed)s" }
@@ -196,6 +200,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var metricsStore: MetricsStore?
     private var refreshTimer: Timer?
     private var metricsRetentionTask: Task<Void, Never>?
+    // Q10 auto-actions.
+    private var actionRegistry: ActionRegistry?
+    private var policyEngine: PolicyEngine?
+    private var auditLog: AuditLog?
+    private var actionRunner: ActionRunner?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -320,6 +329,72 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         await notifs.requestAuthorization()
         self.notifications = notifs
 
+        // ── Q10 auto-actions ────────────────────────────────────────────
+        // Build the action subsystem: registry (4 reversible actions) +
+        // policy engine (gate chain) + always-on audit log + runner. The
+        // runner is wired into the channel host (read-only /actions +
+        // uzora_list_actions), the EventBus (auto path), and the
+        // notification center (confirmed "Run" button).
+        let actionRegistry = ActionRegistry.defaultPopulated()
+        let policyEngine = PolicyEngine()
+        let auditLog: AuditLog?
+        do {
+            auditLog = try AuditLog(retentionDays: initial.general.logRetentionDays)
+            await auditLog?.startRotationLoop()
+        } catch {
+            log.error("AuditLog init failed: \(String(describing: error), privacy: .public); actions disabled")
+            auditLog = nil
+        }
+        self.actionRegistry = actionRegistry
+        self.policyEngine = policyEngine
+        self.auditLog = auditLog
+
+        // Context provider for the PolicyEngine: live power state + Focus +
+        // the current [actions] config. Power/Focus are read from the
+        // registry's current profile (kept in sync by the PowerMonitor).
+        let registryForCtx = registry
+        let loaderForCtx = loader
+        let actionRunner: ActionRunner?
+        if let auditLog {
+            actionRunner = ActionRunner(
+                registry: actionRegistry,
+                policy: policyEngine,
+                audit: auditLog,
+                contextProvider: { [registryForCtx, loaderForCtx] in
+                    let profile = await registryForCtx.powerProfile()
+                    let cfg = await loaderForCtx.current.actions
+                    return PolicyEngine.Context(
+                        powerState: profile.state,
+                        focusActive: profile.state == .focusActive,
+                        config: cfg
+                    )
+                }
+            )
+        } else {
+            actionRunner = nil
+        }
+        self.actionRunner = actionRunner
+
+        // Confirmed-action path: the notification "Run" button. Only probes
+        // that currently map to at least one action get the button. MVP: the
+        // four actions all bind to `disk`, so derive the set from the
+        // registry mapping at the alert floor.
+        if actionRunner != nil {
+            let actionableProbes = Set(ActionRegistry.Descriptors.all.map(\.relatedProbe))
+            notifs.wireRunAction(actionableProbes: actionableProbes) { [weak self] probe, severity in
+                guard let runner = await self?.actionRunner else { return }
+                let cfg = await loaderForCtx.current.actions
+                // Run EVERY action mapped to this probe+severity with
+                // trigger=confirmed (the user clicked). PolicyEngine bypasses
+                // the enabled/power/focus/cooldown/rate gates for a confirmed
+                // run but still enforces reversibility + audits the outcome.
+                let mapped = await actionRegistry.actionsFor(probe: probe, severity: severity, config: cfg)
+                for action in mapped {
+                    _ = await runner.run(actionID: action.descriptor.id, trigger: .confirmed)
+                }
+            }
+        }
+
         // Seed the probe inventory in the state store, reflecting each
         // probe's config-effective base poll interval.
         let names = await registry.registeredNames()
@@ -366,6 +441,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             }
         }
 
+        // Q10 AUTO path: on a mapped alert, run any auto-enabled action(s)
+        // through the policy gate chain. The runner itself short-circuits
+        // when no action is auto-enabled (the Q3 default), so this is inert
+        // until the user opts in. After a run, refresh the popover's recent-
+        // actions mirror from the audit log.
+        if let actionRunner {
+            let runnerRef = actionRunner
+            await eventBus.subscribe { [weak weakState] event in
+                Task { [weak weakState] in
+                    await runnerRef.handleAlertEvent(event)
+                    let recent = await runnerRef.recentAudit(20)
+                    await MainActor.run { weakState?.recentActions = recent }
+                }
+            }
+        }
+
         // Bring up the four-channel bridge respecting HTTP/MCP enablement.
         let portConfig = initial.http.port
         let portEnv = ProcessInfo.processInfo.environment["UZORA_HTTP_PORT"].flatMap { UInt16($0) }
@@ -382,7 +473,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // (registered later in this method) then applies the change.
                 configLoader: loader,
                 // Global write gate from config — default true (loopback-only).
-                allowWrites: initial.mcp.allowWrites
+                allowWrites: initial.mcp.allowWrites,
+                // Q10: read-only actions surface (/actions + uzora_list_actions).
+                actionRunner: actionRunner
             )
             do {
                 try await host.start()
@@ -564,6 +657,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         }
         uiState.topCPUProcesses = topCPU
         self.previousSnaps = snaps
+
+        // Q10: refresh the popover's recent-actions mirror so a confirmed
+        // "Run" click (which doesn't go through the alert-event path) also
+        // surfaces promptly, and so a fresh launch hydrates from the audit
+        // log's restored tail.
+        if let runner = self.actionRunner {
+            let recent = await runner.recentAudit(20)
+            uiState.recentActions = recent
+        }
     }
 
     /// Previous ProcessSampler snapshot — kept on the actor for per-PID
@@ -608,12 +710,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let r = self.registry
         let l = self.loader
         let m = self.metricsStore
+        let a = self.auditLog
         metricsRetentionTask?.cancel()
         Task {
             await h?.stop()
             await r?.stop()
             await l?.stopWatching()
             await m?.close()
+            await a?.close()
         }
     }
 

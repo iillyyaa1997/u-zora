@@ -34,6 +34,17 @@ public enum ConfigSanitizer {
     /// the Duration math downstream).
     public static let pollIntervalRange: ClosedRange<Int> = 1...86_400
 
+    /// Q10 actions cool-down window (minutes). 0 disables the wait (the
+    /// `cool_down_enabled` toggle is the real off-switch); the ceiling keeps a
+    /// hand-edit from setting an effectively-infinite cool-down by accident
+    /// and stays well clear of any Int/Date overflow.
+    public static let coolDownMinutesRange: ClosedRange<Int> = 0...10_080 // up to 7 days
+
+    /// Q10 actions rate-limit (max auto-runs per rolling hour). Floor of 1 so
+    /// a positive cap is meaningful (0 would silently block every auto action
+    /// even with the gate "enabled"); ceiling guards the rolling-counter math.
+    public static let rateLimitPerHourRange: ClosedRange<Int> = 1...1_000
+
     /// Per-unit sane upper bounds for a probe's warn/critical threshold. The
     /// lower bound is always 0 (negative thresholds are nonsensical for every
     /// probe unit here and underflow the UInt64 conversions).
@@ -151,6 +162,38 @@ public enum ConfigSanitizer {
             return pollIntervalRange.upperBound
         }
         return sec
+    }
+
+    /// Clamp `[actions] cool_down_minutes` read from disk into its safe range.
+    /// A hand-edited negative / absurd value is coerced + logged rather than
+    /// allowed to break the PolicyEngine cool-down math or disable safety by
+    /// overflow.
+    public static func clampCoolDownMinutes(_ minutes: Int) -> Int {
+        if minutes < coolDownMinutesRange.lowerBound {
+            log.warning("config: cool_down_minutes=\(minutes, privacy: .public) below floor; clamping to \(coolDownMinutesRange.lowerBound, privacy: .public)")
+            return coolDownMinutesRange.lowerBound
+        }
+        if minutes > coolDownMinutesRange.upperBound {
+            log.warning("config: cool_down_minutes=\(minutes, privacy: .public) above ceiling; clamping to \(coolDownMinutesRange.upperBound, privacy: .public)")
+            return coolDownMinutesRange.upperBound
+        }
+        return minutes
+    }
+
+    /// Clamp `[actions] rate_limit_per_hour` read from disk into its safe
+    /// range. A non-positive value (which would silently block every auto
+    /// action while the gate reads as "enabled") is coerced up to the floor +
+    /// logged so the user's intent (a real cap) is preserved.
+    public static func clampRateLimitPerHour(_ perHour: Int) -> Int {
+        if perHour < rateLimitPerHourRange.lowerBound {
+            log.warning("config: rate_limit_per_hour=\(perHour, privacy: .public) below floor; clamping to \(rateLimitPerHourRange.lowerBound, privacy: .public)")
+            return rateLimitPerHourRange.lowerBound
+        }
+        if perHour > rateLimitPerHourRange.upperBound {
+            log.warning("config: rate_limit_per_hour=\(perHour, privacy: .public) above ceiling; clamping to \(rateLimitPerHourRange.upperBound, privacy: .public)")
+            return rateLimitPerHourRange.upperBound
+        }
+        return perHour
     }
 
     /// Clamp a threshold read from disk into `0…unit.upperBound`. A

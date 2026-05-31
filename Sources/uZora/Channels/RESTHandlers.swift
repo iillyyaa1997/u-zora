@@ -24,6 +24,9 @@ public struct RESTHandlers: Sendable {
     /// answers 403 without touching state or disk. Default `true` —
     /// loopback-only personal use; see `MCPConfig.allowWrites`.
     public let allowWrites: Bool
+    /// Q10 actions: read-only surface for `GET /actions` + `uzora_list_actions`.
+    /// Optional so existing read-only test harnesses build without one.
+    public let actionRunner: ActionRunner?
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "rest")
 
@@ -31,12 +34,14 @@ public struct RESTHandlers: Sendable {
         state: StateStore,
         metricsStore: MetricsStore? = nil,
         configLoader: ConfigLoader? = nil,
-        allowWrites: Bool = true
+        allowWrites: Bool = true,
+        actionRunner: ActionRunner? = nil
     ) {
         self.state = state
         self.metricsStore = metricsStore
         self.configLoader = configLoader
         self.allowWrites = allowWrites
+        self.actionRunner = actionRunner
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -420,6 +425,94 @@ public struct RESTHandlers: Sendable {
         )
     }
 
+    // MARK: - GET /actions  (Q10 — read-only)
+
+    /// Read-only view of one action: its descriptor metadata + whether AUTO
+    /// execution is currently opted-in (Q3). The notification "Run" button
+    /// path works regardless of `auto_enabled`.
+    public struct ActionInfo: Codable, Sendable {
+        public let id: String
+        public let name: String
+        public let detail: String
+        public let reversible: Bool
+        public let requiresSudo: Bool
+        public let caution: Bool
+        public let relatedProbe: String
+        public let relatedSeverityFloor: String
+        public let autoEnabled: Bool
+        public init(descriptor: ActionDescriptor, autoEnabled: Bool) {
+            self.id = descriptor.id
+            self.name = descriptor.name
+            self.detail = descriptor.detail
+            self.reversible = descriptor.reversible
+            self.requiresSudo = descriptor.requiresSudo
+            self.caution = descriptor.caution
+            self.relatedProbe = descriptor.relatedProbe
+            self.relatedSeverityFloor = descriptor.relatedSeverityFloor.rawValue
+            self.autoEnabled = autoEnabled
+        }
+    }
+
+    public struct ActionsResponse: Codable, Sendable {
+        public let actions: [ActionInfo]
+        public let recentAudit: [AuditLog.Entry]
+        /// Global safety knobs snapshot (so an LLM/UI sees the current policy).
+        public let safety: SafetyInfo
+        public let note: String?
+        public init(actions: [ActionInfo], recentAudit: [AuditLog.Entry], safety: SafetyInfo, note: String? = nil) {
+            self.actions = actions
+            self.recentAudit = recentAudit
+            self.safety = safety
+            self.note = note
+        }
+    }
+
+    public struct SafetyInfo: Codable, Sendable {
+        public let coolDownEnabled: Bool
+        public let coolDownMinutes: Int
+        public let rateLimitEnabled: Bool
+        public let rateLimitPerHour: Int
+        public let powerGate: Bool
+        public let focusGate: Bool
+        public let dryRunPreview: Bool
+        public let auditLogAlwaysOn: Bool
+        public init(config: ActionsConfig) {
+            self.coolDownEnabled = config.coolDownEnabled
+            self.coolDownMinutes = config.coolDownMinutes
+            self.rateLimitEnabled = config.rateLimitEnabled
+            self.rateLimitPerHour = config.rateLimitPerHour
+            self.powerGate = config.powerGate
+            self.focusGate = config.focusGate
+            self.dryRunPreview = config.dryRunPreview
+            self.auditLogAlwaysOn = true
+        }
+    }
+
+    /// `GET /actions` — list available actions, their auto-enabled status,
+    /// the global safety policy, and the recent audit-log tail. READ-ONLY;
+    /// there is no write endpoint for actions in this iteration (Q8).
+    public func actions(recentLimit: Int = 20) async -> HTTPResponse {
+        guard let runner = actionRunner else {
+            return encode(ActionsResponse(
+                actions: [],
+                recentAudit: [],
+                safety: SafetyInfo(config: ActionsConfig()),
+                note: "actions subsystem not wired (running headless?)"
+            ), status: 200)
+        }
+        let config = (await configLoader?.current.actions) ?? ActionsConfig()
+        let descriptors = await runner.descriptors()
+        let infos = descriptors.map { d in
+            ActionInfo(descriptor: d, autoEnabled: config[id: d.id]?.autoEnabled ?? false)
+        }
+        let recent = await runner.recentAudit(recentLimit)
+        return encode(ActionsResponse(
+            actions: infos,
+            recentAudit: recent,
+            safety: SafetyInfo(config: config)
+        ), status: 200)
+    }
+
     // MARK: - Probe name ↔ ProbeOverride keypath mapping
 
     /// The 10 config-known probe names (TOML keys), derived from the single
@@ -460,6 +553,8 @@ public struct RESTHandlers: Sendable {
             return await alerts(minSeverity: floor)
         case ("GET", "/probes"):
             return await probes()
+        case ("GET", "/actions"):
+            return await actions()
         case ("GET", "/metrics"):
             let probe = request.query["probe"]
             let name = request.query["name"]

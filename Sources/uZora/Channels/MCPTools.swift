@@ -45,6 +45,14 @@ public struct MCPTools: Sendable {
             let resp = await rest.probes()
             return MCPTools.wrap(resp)
 
+        case "uzora_list_actions":
+            // Read-only (Q8): available actions + their auto-enabled status +
+            // recent audit-log entries. The LLM can ADVISE ("disk full —
+            // there's a prune_apfs_snapshots action") but cannot execute;
+            // there is intentionally no uzora_run_action tool this iteration.
+            let resp = await rest.actions()
+            return MCPTools.wrap(resp)
+
         case "uzora_get_metric":
             var probe: String? = nil
             var fromDate: Date? = nil
@@ -193,6 +201,14 @@ public struct MCPTools: Sendable {
         [
             "name": .string("uzora_list_probes"),
             "description": .string("Return the inventory of registered probes with their poll interval and last-run timestamps."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([:]),
+            ]),
+        ],
+        [
+            "name": .string("uzora_list_actions"),
+            "description": .string("Read-only: list uZora's reversible cleanup actions (e.g. prune_apfs_snapshots, clear_derived_data, brew_cleanup, clear_user_caches), each with its auto-enabled status, related probe/severity, reversibility/sudo/caution flags, the global safety policy (cool-down, rate-limit, power/Focus gates), and recent audit-log entries. uZora does NOT execute actions via MCP — use this to ADVISE the user (e.g. 'disk is full; there is a prune_apfs_snapshots action you can enable')."),
             "inputSchema": .object([
                 "type": .string("object"),
                 "properties": .object([:]),

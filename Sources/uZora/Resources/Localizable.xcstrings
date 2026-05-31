@@ -2,6 +2,22 @@
   "sourceLanguage": "en",
   "version": "1.0",
   "strings": {
+    "Actions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actions"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Действия"
+          }
+        }
+      }
+    },
     "Active alerts": {
       "localizations": {
         "en": {
@@ -30,6 +46,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Все системы в норме"
+          }
+        }
+      }
+    },
+    "Audit log": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audit log"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журнал аудита"
+          }
+        }
+      }
+    },
+    "Auto-actions run reversible cleanup automatically when a disk alert fires. Everything is OFF by default — opt in per action below. The notification “Run cleanup” button works without opting in.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auto-actions run reversible cleanup automatically when a disk alert fires. Everything is OFF by default — opt in per action below. The notification “Run cleanup” button works without opting in."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Авто-действия запускают обратимую очистку автоматически при срабатывании оповещения о диске. По умолчанию всё ВЫКЛЮЧЕНО — включайте каждое действие ниже. Кнопка «Выполнить очистку» в уведомлении работает и без включения."
           }
         }
       }
@@ -66,6 +114,54 @@
         }
       }
     },
+    "CPU": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "CPU"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Процессор"
+          }
+        }
+      }
+    },
+    "CPU temp": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "CPU temp"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Темп. ЦП"
+          }
+        }
+      }
+    },
+    "Caution: removes ~/Library/Caches. Some apps store login/session state there and may need to re-authenticate or rebuild settings.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Caution: removes ~/Library/Caches. Some apps store login/session state there and may need to re-authenticate or rebuild settings."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Осторожно: удаляет ~/Library/Caches. Некоторые приложения хранят там данные входа/сессии и могут потребовать повторной авторизации или пересоздания настроек."
+          }
+        }
+      }
+    },
     "Check for updates": {
       "localizations": {
         "en": {
@@ -98,6 +194,38 @@
         }
       }
     },
+    "Clear Xcode DerivedData": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear Xcode DerivedData"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Очистить Xcode DerivedData"
+          }
+        }
+      }
+    },
+    "Clear user caches": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear user caches"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Очистить пользовательские кэши"
+          }
+        }
+      }
+    },
     "Coming in Phase 6": {
       "localizations": {
         "en": {
@@ -114,6 +242,38 @@
         }
       }
     },
+    "Compute dry-run preview": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compute dry-run preview"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вычислять предпросмотр (dry-run)"
+          }
+        }
+      }
+    },
+    "Cool-down": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cool-down"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пауза"
+          }
+        }
+      }
+    },
     "Copy": {
       "localizations": {
         "en": {
@@ -126,38 +286,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Копировать"
-          }
-        }
-      }
-    },
-    "CPU": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "CPU"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Процессор"
-          }
-        }
-      }
-    },
-    "CPU temp": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "CPU temp"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Темп. ЦП"
           }
         }
       }
@@ -194,18 +322,34 @@
         }
       }
     },
-    "days": {
+    "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). Reversible: macOS recreates snapshots automatically.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "days"
+            "value": "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). Reversible: macOS recreates snapshots automatically."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "дн."
+            "value": "Удалить локальные снимки Time Machine (tmutil deletelocalsnapshots). Обратимо: macOS пересоздаёт снимки автоматически."
+          }
+        }
+      }
+    },
+    "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). macOS recreates them automatically.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete local Time Machine snapshots (tmutil deletelocalsnapshots). macOS recreates them automatically."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удалить локальные снимки Time Machine (tmutil deletelocalsnapshots). macOS пересоздаёт их автоматически."
           }
         }
       }
@@ -222,6 +366,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Диск свободно"
+          }
+        }
+      }
+    },
+    "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Включите там «Уведомления, чувствительные ко времени» для uZora, чтобы критические оповещения пробивали Focus."
+          }
+        }
+      }
+    },
+    "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Focus обрабатывается macOS: баннеры warn автоматически скрываются во время Focus, а критические уведомления пробиваются как Time-Sensitive."
           }
         }
       }
@@ -338,22 +514,6 @@
         }
       }
     },
-    "MCP server enabled": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MCP server enabled"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "MCP-сервер включён"
-          }
-        }
-      }
-    },
     "MCP URL": {
       "localizations": {
         "en": {
@@ -370,6 +530,22 @@
         }
       }
     },
+    "MCP server enabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP server enabled"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MCP-сервер включён"
+          }
+        }
+      }
+    },
     "Memory": {
       "localizations": {
         "en": {
@@ -382,6 +558,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Память"
+          }
+        }
+      }
+    },
+    "No actions run yet.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No actions run yet."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Действия ещё не выполнялись."
+          }
+        }
+      }
+    },
+    "Notification Settings…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification Settings…"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Настройки уведомлений…"
           }
         }
       }
@@ -434,22 +642,6 @@
         }
       }
     },
-    "Open events folder": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open events folder"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Открыть папку событий"
-          }
-        }
-      }
-    },
     "Open Settings…": {
       "localizations": {
         "en": {
@@ -478,6 +670,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Открыть Сведения о системе"
+          }
+        }
+      }
+    },
+    "Open events folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open events folder"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть папку событий"
+          }
+        }
+      }
+    },
+    "Open folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open folder"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Открыть папку"
           }
         }
       }
@@ -530,6 +754,22 @@
         }
       }
     },
+    "Prune local APFS snapshots": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prune local APFS snapshots"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удалить локальные снимки APFS"
+          }
+        }
+      }
+    },
     "Quit": {
       "localizations": {
         "en": {
@@ -542,6 +782,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "Выйти"
+          }
+        }
+      }
+    },
+    "Rate limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rate limit"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ограничение частоты"
+          }
+        }
+      }
+    },
+    "Recent actions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent actions"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Недавние действия"
+          }
+        }
+      }
+    },
+    "Remove ~/Library/Caches contents. Caution: some apps store login/session state under Caches and may need to re-authenticate or rebuild settings.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove ~/Library/Caches contents. Caution: some apps store login/session state under Caches and may need to re-authenticate or rebuild settings."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удалить содержимое ~/Library/Caches. Осторожно: некоторые приложения хранят в Caches данные входа/сессии и могут потребовать повторной авторизации или пересоздания настроек."
+          }
+        }
+      }
+    },
+    "Remove ~/Library/Developer/Xcode/DerivedData. Reversible: Xcode rebuilds it on the next build.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove ~/Library/Developer/Xcode/DerivedData. Reversible: Xcode rebuilds it on the next build."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удалить ~/Library/Developer/Xcode/DerivedData. Обратимо: Xcode пересоберёт при следующей сборке."
+          }
+        }
+      }
+    },
+    "Remove ~/Library/Developer/Xcode/DerivedData. Xcode rebuilds it on the next build.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove ~/Library/Developer/Xcode/DerivedData. Xcode rebuilds it on the next build."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Удалить ~/Library/Developer/Xcode/DerivedData. Xcode пересоберёт при следующей сборке."
           }
         }
       }
@@ -562,6 +882,22 @@
         }
       }
     },
+    "Restart uZora to apply language change.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restart uZora to apply language change."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Перезапустите uZora, чтобы применить смену языка."
+          }
+        }
+      }
+    },
     "Retention": {
       "localizations": {
         "en": {
@@ -574,6 +910,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "Хранение"
+          }
+        }
+      }
+    },
+    "Run 'brew cleanup' to remove stale Homebrew downloads and old versions. Skipped if Homebrew is not installed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run 'brew cleanup' to remove stale Homebrew downloads and old versions. Skipped if Homebrew is not installed."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запустить «brew cleanup» для удаления устаревших загрузок Homebrew и старых версий. Пропускается, если Homebrew не установлен."
+          }
+        }
+      }
+    },
+    "Run 'brew cleanup' to remove stale Homebrew downloads. Skipped if Homebrew is not installed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run 'brew cleanup' to remove stale Homebrew downloads. Skipped if Homebrew is not installed."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запустить «brew cleanup» для удаления устаревших загрузок Homebrew. Пропускается, если Homebrew не установлен."
+          }
+        }
+      }
+    },
+    "Run brew cleanup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run brew cleanup"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запустить brew cleanup"
+          }
+        }
+      }
+    },
+    "Run cleanup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run cleanup"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выполнить очистку"
+          }
+        }
+      }
+    },
+    "SQLite metrics history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SQLite metrics history"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "История метрик SQLite"
+          }
+        }
+      }
+    },
+    "Safety": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Safety"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Безопасность"
           }
         }
       }
@@ -658,18 +1090,34 @@
         }
       }
     },
-    "SQLite metrics history": {
+    "Skip auto-actions during Focus": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "SQLite metrics history"
+            "value": "Skip auto-actions during Focus"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "История метрик SQLite"
+            "value": "Пропускать авто-действия во время Focus"
+          }
+        }
+      }
+    },
+    "Skip auto-actions on battery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skip auto-actions on battery"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пропускать авто-действия от батареи"
           }
         }
       }
@@ -770,6 +1218,22 @@
         }
       }
     },
+    "The audit log is always on and cannot be disabled.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The audit log is always on and cannot be disabled."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журнал аудита всегда включён и не может быть отключён."
+          }
+        }
+      }
+    },
     "Theme": {
       "localizations": {
         "en": {
@@ -798,22 +1262,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Топ-процессы"
-          }
-        }
-      }
-    },
-    "uZora version": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "uZora version"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Версия uZora"
           }
         }
       }
@@ -850,50 +1298,146 @@
         }
       }
     },
-    "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications.": {
+    "blocked": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Focus is handled by macOS: warn banners are withheld during Focus automatically, while critical alerts pierce as Time-Sensitive notifications."
+            "value": "blocked"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Focus обрабатывается macOS: баннеры warn автоматически скрываются во время Focus, а критические уведомления пробиваются как Time-Sensitive."
+            "value": "заблокировано"
           }
         }
       }
     },
-    "Notification Settings…": {
+    "caution": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Notification Settings…"
+            "value": "caution"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Настройки уведомлений…"
+            "value": "осторожно"
           }
         }
       }
     },
-    "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus.": {
+    "days": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enable “Time-Sensitive Notifications” for uZora there so critical alerts can pierce Focus."
+            "value": "days"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Включите там «Уведомления, чувствительные ко времени» для uZora, чтобы критические оповещения пробивали Focus."
+            "value": "дн."
+          }
+        }
+      }
+    },
+    "failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "failed"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ошибка"
+          }
+        }
+      }
+    },
+    "freed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "freed"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "освобождено"
+          }
+        }
+      }
+    },
+    "hr": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hr"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ч"
+          }
+        }
+      }
+    },
+    "min": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "min"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "мин"
+          }
+        }
+      }
+    },
+    "nothing to do": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "nothing to do"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "нечего делать"
+          }
+        }
+      }
+    },
+    "uZora version": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "uZora version"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Версия uZora"
           }
         }
       }

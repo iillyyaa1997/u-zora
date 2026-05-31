@@ -440,7 +440,8 @@ struct WriteOperationsTests {
         // Write tools still advertised when disabled (clearer 403 than unknown).
         #expect(names.contains("uzora_ack_alert"))
         #expect(names.contains("uzora_set_probe_config"))
-        #expect(tools?.count == 7)
+        // 6 read tools (incl. Q10 uzora_list_actions) + 2 write tools = 8.
+        #expect(tools?.count == 8)
         // Their description carries the "disabled" hint.
         let ackDesc = tools?.first { $0["name"] as? String == "uzora_ack_alert" }?["description"] as? String
         #expect(ackDesc?.contains("DISABLED") == true)

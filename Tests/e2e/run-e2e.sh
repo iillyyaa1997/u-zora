@@ -43,6 +43,9 @@ EVENTS_DIR="$E2E_TMP/events"
 METRICS_DB="$E2E_TMP/metrics.sqlite"
 CONFIG_PATH="$E2E_TMP/config.toml"
 WATCHDOG_STATE="$E2E_TMP/watchdog-state.json"
+# Q10: isolate the actions audit log (directory) so the harness never
+# touches the operator's real ~/Library/Application Support/uZora audit.
+ACTIONS_AUDIT_DIR="$E2E_TMP/actions-audit"
 APP_LOG="$E2E_TMP/uzora.log"
 # Pick a high, unlikely-to-collide loopback port.
 PORT="${UZORA_E2E_PORT:-39937}"
@@ -141,6 +144,7 @@ launch_app() {
   UZORA_METRICS_PATH="$METRICS_DB" \
   UZORA_CONFIG_PATH="$CONFIG_PATH" \
   UZORA_WATCHDOG_STATE_PATH="$WATCHDOG_STATE" \
+  UZORA_ACTIONS_AUDIT_PATH="$ACTIONS_AUDIT_DIR" \
   UZORA_E2E_SYNTHETIC_ALERT="$mode" \
     "$APP_BUNDLE/Contents/MacOS/uZora" >>"$APP_LOG" 2>&1 &
   APP_PID=$!
@@ -178,6 +182,41 @@ assert_jq   "/probes has 11 entries"       "$PROBES" '.probes | length' '11'
 assert_contains "/probes includes disk"    "$PROBES" '"disk"'
 assert_contains "/probes includes synthetic" "$PROBES" '"synthetic"'
 
+# ===========================================================================
+# Q10 auto-actions — read-only surface (/actions + uzora_list_actions) and
+# the always-on audit log. Everything is auto-disabled by default; we don't
+# exercise auto execution here (it would require opting in + a disk alert),
+# but we DO drive a CONFIRMED dry-run-ish path implicitly via the audit file
+# check below is satisfied once any action records (the synthetic alert maps
+# to no action — `synthetic` != `disk` — so we assert the read surfaces and
+# the audit FILE/endpoint shape, which is what this iteration ships).
+# ===========================================================================
+section "REST /actions (Q10 read-only)"
+ACTIONS="$(curl -fsS --max-time 3 "$BASE/actions")"
+assert_jq   "/actions lists 4 actions"          "$ACTIONS" '.actions | length' '4'
+assert_contains "/actions has prune_apfs_snapshots" "$ACTIONS" 'prune_apfs_snapshots'
+assert_contains "/actions has clear_derived_data"   "$ACTIONS" 'clear_derived_data'
+assert_contains "/actions has brew_cleanup"         "$ACTIONS" 'brew_cleanup'
+assert_contains "/actions has clear_user_caches"    "$ACTIONS" 'clear_user_caches'
+# Everything OFF by default (Q3).
+assert_jq   "/actions all auto_enabled=false"   "$ACTIONS" '[.actions[] | select(.auto_enabled==true)] | length' '0'
+# clear_user_caches carries the caution flag (Q5).
+assert_jq   "/actions clear_user_caches caution" "$ACTIONS" '.actions[] | select(.id=="clear_user_caches") | .caution' 'true'
+# All four reversible, none require sudo (Q1).
+assert_jq   "/actions all reversible"           "$ACTIONS" '[.actions[] | select(.reversible==false)] | length' '0'
+assert_jq   "/actions none require sudo"         "$ACTIONS" '[.actions[] | select(.requires_sudo==true)] | length' '0'
+# Safety policy block: audit log always-on, defaults present.
+assert_jq   "/actions audit_log always on"      "$ACTIONS" '.safety.audit_log_always_on' 'true'
+assert_jq   "/actions cool_down default 30"     "$ACTIONS" '.safety.cool_down_minutes' '30'
+assert_jq   "/actions rate_limit default 6"     "$ACTIONS" '.safety.rate_limit_per_hour' '6'
+
+section "MCP uzora_list_actions"
+MCP_ACTIONS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"uzora_list_actions","arguments":{}}}' "$BASE/mcp")"
+assert_jq   "uzora_list_actions not error"      "$MCP_ACTIONS" '.result.isError' 'false'
+assert_jq   "uzora_list_actions has 4 actions"  "$MCP_ACTIONS" '.result.structuredContent.actions | length' '4'
+assert_contains "uzora_list_actions surfaces prune" "$MCP_ACTIONS" 'prune_apfs_snapshots'
+
 section "REST /alerts (synthetic warn must be firing)"
 # Give the 2s synthetic poll a couple cycles.
 sleep 3
@@ -198,11 +237,12 @@ assert_jq   "initialize serverInfo.name"   "$MCP_INIT" '.result.serverInfo.name'
 
 MCP_TOOLS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$BASE/mcp")"
-# 5 read tools + 2 write tools (write tools always listed; allow_writes
-# defaults to true in the harness config).
-assert_jq   "tools/list has 7 tools"       "$MCP_TOOLS" '.result.tools | length' '7'
+# 6 read tools (incl. Q10 uzora_list_actions) + 2 write tools (write tools
+# always listed; allow_writes defaults to true in the harness config).
+assert_jq   "tools/list has 8 tools"       "$MCP_TOOLS" '.result.tools | length' '8'
 assert_contains "tools/list has uzora_status"     "$MCP_TOOLS" 'uzora_status'
 assert_contains "tools/list has uzora_list_alerts" "$MCP_TOOLS" 'uzora_list_alerts'
+assert_contains "tools/list has uzora_list_actions" "$MCP_TOOLS" 'uzora_list_actions'
 assert_contains "tools/list has uzora_ack_alert"   "$MCP_TOOLS" 'uzora_ack_alert'
 assert_contains "tools/list has uzora_set_probe_config" "$MCP_TOOLS" 'uzora_set_probe_config'
 
@@ -410,6 +450,61 @@ ALERTS3="$(curl -fsS --max-time 3 "$BASE/alerts")"
 assert_jq "/alerts synthetic cleared" "$ALERTS3" '[.alerts[] | select(.probe=="synthetic")] | length' '0'
 LAST_SYNTH_EVENT="$(grep '"synthetic' "$JSONL_FILE" | tail -1)"
 assert_contains "JSONL records cleared event" "$LAST_SYNTH_EVENT" 'cleared'
+
+# ===========================================================================
+# Run 4 — Q10 AUTO action audit. Pre-write a config that opts in `brew_cleanup`
+# AND remaps it to the `synthetic` probe (config-override, Q6) so the AUTO
+# path fires when the synthetic warn alert appears. brew is absent on CI, so
+# the action SKIPS gracefully — but it still records an always-on audit line.
+# This deterministically exercises: auto trigger → policy allow → execute
+# (skip) → audit FILE created, without needing a real disk-low condition.
+# ===========================================================================
+section "Q10 auto-action audit (synthetic-mapped brew_cleanup)"
+kill "$APP_PID" 2>/dev/null
+for _ in $(seq 1 20); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.3; done
+# Write a config opting in brew_cleanup, remapped to the synthetic probe.
+cat > "$CONFIG_PATH" <<'TOML'
+[actions]
+cool_down_enabled = false
+rate_limit_enabled = false
+power_gate = false
+focus_gate = false
+[actions.brew_cleanup]
+auto_enabled = true
+probe = "synthetic"
+severity_floor = "warn"
+TOML
+# Fresh audit dir for this run so the assertion is unambiguous.
+ACTIONS_AUDIT_DIR="$E2E_TMP/actions-audit-run4"
+launch_app warn
+if wait_for_http; then pass "HTTP server reachable (run 4)"; else fail "HTTP server reachable (run 4)"; fi
+# Give the 2s synthetic poll a few cycles for the alert→auto-action path.
+sleep 5
+# /actions must now report brew_cleanup auto_enabled=true (config reflected).
+ACTIONS4="$(curl -fsS --max-time 3 "$BASE/actions")"
+assert_jq "/actions brew_cleanup auto_enabled=true" "$ACTIONS4" '.actions[] | select(.id=="brew_cleanup") | .auto_enabled' 'true'
+# The always-on audit log FILE must exist and carry a brew_cleanup entry.
+AUDIT_FILE="$(ls "$ACTIONS_AUDIT_DIR"/actions-audit-*.jsonl 2>/dev/null | head -1)"
+if [ -n "$AUDIT_FILE" ] && [ -s "$AUDIT_FILE" ]; then
+  pass "audit-log file created + non-empty"
+  if grep -q '"action_id":"brew_cleanup"' "$AUDIT_FILE"; then
+    pass "audit-log records brew_cleanup auto run"
+  else
+    fail "audit-log records brew_cleanup auto run" "$(tail -2 "$AUDIT_FILE")"
+  fi
+  # The recorded line is valid JSON with the audit schema keys.
+  if tail -1 "$AUDIT_FILE" | jq -e '.action_id and .trigger and .policy_decision' >/dev/null 2>&1; then
+    pass "audit-log line has schema keys"
+  else
+    fail "audit-log line has schema keys" "$(tail -1 "$AUDIT_FILE")"
+  fi
+  # /actions recent_audit surfaces the run too.
+  assert_jq "/actions recent_audit non-empty" "$ACTIONS4" '.recent_audit | length > 0' 'true'
+else
+  fail "audit-log file created + non-empty" "no actions-audit-*.jsonl in $ACTIONS_AUDIT_DIR"
+fi
+kill "$APP_PID" 2>/dev/null
+for _ in $(seq 1 20); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.3; done
 
 # ---------------------------------------------------------------------------
 # Summary.

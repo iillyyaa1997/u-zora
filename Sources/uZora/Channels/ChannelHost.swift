@@ -16,6 +16,7 @@ public actor ChannelHost {
     public let state: StateStore
     public let jsonl: JSONLEventSink
     public let metrics: MetricsStore?
+    public let actionRunner: ActionRunner?
     public let httpServer: HTTPServer
     public let rest: RESTHandlers
     public let sse: SSEStream
@@ -34,12 +35,14 @@ public actor ChannelHost {
         eventBus: EventBus,
         metrics: MetricsStore? = nil,
         configLoader: ConfigLoader? = nil,
-        allowWrites: Bool = true
+        allowWrites: Bool = true,
+        actionRunner: ActionRunner? = nil
     ) {
         self.port = port
         self.state = state
         self.jsonl = jsonl
         self.metrics = metrics
+        self.actionRunner = actionRunner
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
@@ -47,7 +50,8 @@ public actor ChannelHost {
             state: state,
             metricsStore: metrics,
             configLoader: configLoader,
-            allowWrites: allowWrites
+            allowWrites: allowWrites,
+            actionRunner: actionRunner
         )
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus)
@@ -114,6 +118,9 @@ public actor ChannelHost {
         }
         await httpServer.register(method: "GET", path: "/probes") { req in
             await rest.probes()
+        }
+        await httpServer.register(method: "GET", path: "/actions") { req in
+            await rest.actions()
         }
         await httpServer.register(method: "GET", path: "/metrics") { req in
             let probe = req.query["probe"]

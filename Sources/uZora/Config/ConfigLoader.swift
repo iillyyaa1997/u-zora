@@ -23,17 +23,6 @@ public actor ConfigLoader {
     private var watchSource: DispatchSourceFileSystemObject?
     private var watchedFD: Int32 = -1
 
-    /// Exact TOML text of the most recent `write(_:)`. The file-watcher
-    /// compares an incoming reload's on-disk text against this and SKIPS the
-    /// reload+broadcast when they match byte-for-byte — that event is just our
-    /// own atomic rename echoing back, and broadcasting it would fire the
-    /// hot-reload chain a SECOND time for byte-identical content (every in-app
-    /// reconfigure used to reconfigure twice). A genuine external edit differs
-    /// from this text, so it still reloads normally. Cleared whenever a real
-    /// external reload lands so a later edit reverting to the last-written
-    /// bytes is still observed.
-    private var lastWrittenTOML: String?
-
     /// Test hook: total number of observer broadcasts performed (both the
     /// direct `write()` broadcast and watcher-driven reloads). A single
     /// in-app `write()` must increment this by exactly ONE — the watcher's
@@ -94,47 +83,46 @@ public actor ConfigLoader {
         let text = try String(contentsOf: configURL, encoding: .utf8)
         let parsed = try UZoraConfig.fromTOML(text)
         current = parsed
-        // A genuine external edit invalidates the self-write fingerprint: if
-        // the user later re-writes the exact last-written bytes by hand, the
-        // watcher should still observe it.
-        lastWrittenTOML = nil
         log.info("config.toml reloaded")
         broadcast()
         return parsed
     }
 
-    /// Watcher-driven reload. Reads the file; if its text is byte-identical to
-    /// the most recent `write(_:)` (i.e. this event is our own atomic rename
-    /// echoing back), it SKIPS the reload+broadcast so the hot-reload chain
-    /// fires exactly once per in-app write — not twice. A real external edit
-    /// (different bytes) reloads + broadcasts normally.
+    /// Watcher-driven reload. Broadcasts ONLY when the parsed config actually
+    /// differs from `current` — so a self-write echo (write() already set
+    /// `current` + broadcast) stays silent, and the hot-reload chain fires
+    /// exactly once per logical change regardless of how many filesystem
+    /// events one atomic write produces.
+    ///
+    /// This change-detection supersedes the earlier byte-fingerprint approach,
+    /// which had a race: an atomic write (write-tmp + rename) can emit several
+    /// watcher events on some filesystems; the first consumed the fingerprint,
+    /// the second then mis-fired a duplicate broadcast (observed on the macos-15
+    /// CI runner, not locally). Comparing parsed-vs-current is robust to any
+    /// event count and is also semantically cleaner — hot-reload reacts to a
+    /// config *change*, not to a filesystem *event*.
     private func reloadFromWatcher() throws {
         let text = try String(contentsOf: configURL, encoding: .utf8)
-        if let written = lastWrittenTOML, written == text {
-            // Our own write echoing back through the watcher — already
-            // broadcast by write(). Consume the fingerprint (one echo only)
-            // and stay silent.
-            lastWrittenTOML = nil
-            log.debug("config watcher: ignoring self-write echo")
+        let parsed = try UZoraConfig.fromTOML(text)
+        guard parsed != current else {
+            // No semantic change (our own echo, a touch, or an identical
+            // re-save) — current is already up to date, stay silent.
+            log.debug("config watcher: no change, ignoring event")
             return
         }
-        let parsed = try UZoraConfig.fromTOML(text)
         current = parsed
-        lastWrittenTOML = nil
         log.info("config.toml reloaded (external edit)")
         broadcast()
     }
 
     /// Persist `config` to disk atomically and update `current`.
     ///
-    /// Records the exact written TOML so the file-watcher can recognise (and
-    /// suppress) the resulting filesystem event as a self-write echo —
-    /// otherwise every in-app reconfigure would fire the hot-reload chain
-    /// twice (once here, once from the watcher reloading byte-identical
-    /// content).
+    /// Sets `current` + broadcasts immediately. The filesystem events this
+    /// atomic write produces are absorbed by `reloadFromWatcher()`, which
+    /// compares parsed-vs-current and stays silent because `current` already
+    /// equals the written config — so the hot-reload chain fires exactly once.
     public func write(_ config: UZoraConfig) throws {
         let toml = config.toTOML()
-        lastWrittenTOML = toml
         try Self.writeAtomic(toml, to: configURL)
         current = config
         broadcast()

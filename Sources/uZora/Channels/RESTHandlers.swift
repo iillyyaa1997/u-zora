@@ -196,11 +196,18 @@ public struct RESTHandlers: Sendable {
     // MARK: - POST /alerts/ack  (write — acknowledge an alert)
 
     public struct AckResponse: Codable, Sendable {
+        /// `true` only when THIS call performed the ack; `false` for a no-op
+        /// re-ack of an already-acknowledged (still-firing) alert.
         public let acknowledged: Bool
         public let id: String
-        public init(acknowledged: Bool, id: String) {
+        /// Present + `true` only on a no-op re-ack, so a client can tell
+        /// "I just acked it" from "it was already acked". Omitted on a fresh
+        /// ack (snake_case encoder emits `already`).
+        public let already: Bool?
+        public init(acknowledged: Bool, id: String, already: Bool? = nil) {
             self.acknowledged = acknowledged
             self.id = id
+            self.already = already
         }
     }
 
@@ -212,17 +219,25 @@ public struct RESTHandlers: Sendable {
     /// - 403 when writes are globally disabled (`allow_writes = false`).
     /// - 400 when the body is missing / malformed / has no `id`.
     /// - 404 when no active alert carries that id.
-    /// - 200 `{acknowledged:true, id:"..."}` on success.
+    /// - 200 `{acknowledged:true, id:"..."}` on a fresh ack.
+    /// - 200 `{acknowledged:false, id:"...", already:true}` on a no-op re-ack
+    ///   of an already-acknowledged, still-firing alert (the alert IS acked,
+    ///   so 200 not 404 — but `acknowledged:false` signals nothing changed).
     public func acknowledgeAlert(id rawID: String?) async -> HTTPResponse {
         guard allowWrites else { return Self.writesDisabledResponse() }
         guard let id = rawID, !id.isEmpty else {
             return encode(ErrorBody(error: "ack requires a non-empty alert id (body: {\"id\":\"disk:/\"})"), status: 400)
         }
-        let ok = await state.acknowledge(id)
-        if ok {
+        switch await state.acknowledgeResult(id) {
+        case .acknowledged:
             log.info("alert acknowledged via bridge: \(id, privacy: .public)")
             return encode(AckResponse(acknowledged: true, id: id), status: 200)
-        } else {
+        case .alreadyAcknowledged:
+            // No-op: already acked + still firing. 200 (the alert is acked),
+            // but acknowledged=false + already=true so the caller knows this
+            // call changed nothing.
+            return encode(AckResponse(acknowledged: false, id: id, already: true), status: 200)
+        case .notFound:
             return encode(ErrorBody(error: "no active alert with id '\(id)'"), status: 404)
         }
     }
@@ -248,11 +263,32 @@ public struct RESTHandlers: Sendable {
     /// Parsed write request for a single probe override. All knobs optional;
     /// only supplied ones are applied. A field present in the body but `null`
     /// is treated as "not supplied" (keeps the current value).
+    ///
+    /// `pollIntervalSec` is carried as a raw `Double` (the JSON codec hands
+    /// numbers through as Double) and is NOT pre-converted to Int — converting
+    /// an absurd value (e.g. 1e22) via `Int(_:)` traps. The conversion +
+    /// range check happens inside `reconfigureProbe` through `ConfigSanitizer`,
+    /// so an out-of-range value yields a 400 instead of a crash.
     public struct ProbeConfigPatch: Sendable {
         public var enabled: Bool?
         public var warnThreshold: Double?
         public var criticalThreshold: Double?
-        public var pollIntervalSec: Int?
+        /// Raw, un-truncated poll interval (seconds). May be fractional or
+        /// absurd; validated before use.
+        public var pollIntervalSecRaw: Double?
+
+        /// Convenience for callers (tests, SettingsView) that already have an
+        /// `Int`: stores it as the raw Double. Reading back yields the rounded
+        /// Int when the raw value is integral + in `Int` range, else nil.
+        public var pollIntervalSec: Int? {
+            get {
+                guard let raw = pollIntervalSecRaw, raw.isFinite,
+                      raw >= Double(Int.min), raw <= Double(Int.max) else { return nil }
+                return Int(raw.rounded())
+            }
+            set { pollIntervalSecRaw = newValue.map(Double.init) }
+        }
+
         public init(
             enabled: Bool? = nil,
             warnThreshold: Double? = nil,
@@ -262,7 +298,21 @@ public struct RESTHandlers: Sendable {
             self.enabled = enabled
             self.warnThreshold = warnThreshold
             self.criticalThreshold = criticalThreshold
-            self.pollIntervalSec = pollIntervalSec
+            self.pollIntervalSecRaw = pollIntervalSec.map(Double.init)
+        }
+
+        /// Designated init carrying the raw poll double directly (used by the
+        /// JSON/MCP parse path so an absurd value survives to validation).
+        public init(
+            enabled: Bool?,
+            warnThreshold: Double?,
+            criticalThreshold: Double?,
+            pollIntervalSecRaw: Double?
+        ) {
+            self.enabled = enabled
+            self.warnThreshold = warnThreshold
+            self.criticalThreshold = criticalThreshold
+            self.pollIntervalSecRaw = pollIntervalSecRaw
         }
     }
 
@@ -304,11 +354,46 @@ public struct RESTHandlers: Sendable {
         if let enabled = patch.enabled {
             override.enabled = enabled
         }
-        if let poll = patch.pollIntervalSec {
+
+        // ── Validate numeric inputs BEFORE persisting ─────────────────────
+        // A bad value (poll_interval_sec=1e22, top_mem warn=-1) would either
+        // trap on the Int/UInt64 conversion or persist a poison value that
+        // crash-loops the daemon on relaunch. Reject with 400 and DON'T write.
+        let ignoresThresholds = Self.thresholdIgnoringProbes.contains(name)
+
+        // poll_interval_sec: finite, integral, 1…86400.
+        var validatedPoll: Int?
+        if let rawPoll = patch.pollIntervalSecRaw {
+            switch ConfigSanitizer.validatedPollInterval(fromDouble: rawPoll) {
+            case .success(let sec):
+                validatedPoll = sec
+            case .failure(let err):
+                return encode(ErrorBody(error: err.message), status: 400)
+            }
+        }
+
+        // Thresholds: only validate for probes that accept them (others have
+        // their thresholds dropped with a warning below, so a bad value there
+        // is harmless — never persisted).
+        if !ignoresThresholds {
+            let unit = ConfigSanitizer.thresholdUnit(for: name)
+            switch ConfigSanitizer.validate(
+                pollIntervalSec: nil, // poll already validated above
+                warnThreshold: patch.warnThreshold,
+                criticalThreshold: patch.criticalThreshold,
+                thresholdUnit: unit
+            ) {
+            case .success:
+                break
+            case .failure(let err):
+                return encode(ErrorBody(error: err.message), status: 400)
+            }
+        }
+
+        if let poll = validatedPoll {
             override.pollIntervalSec = poll
         }
 
-        let ignoresThresholds = Self.thresholdIgnoringProbes.contains(name)
         if patch.warnThreshold != nil || patch.criticalThreshold != nil {
             if ignoresThresholds {
                 // Honest: do NOT persist a threshold the probe will ignore.
@@ -337,52 +422,29 @@ public struct RESTHandlers: Sendable {
 
     // MARK: - Probe name ↔ ProbeOverride keypath mapping
 
-    /// The 10 config-known probe names (TOML keys). The env-gated `synthetic`
-    /// probe is intentionally excluded — it has no ProbesConfig entry.
-    public static let knownProbeNames: [String] = [
-        "disk", "cpu_temp", "thermal", "battery", "smart",
-        "fan", "kernel_task", "top_cpu", "top_mem", "top_net",
-    ]
+    /// The 10 config-known probe names (TOML keys), derived from the single
+    /// `ProbesConfig.descriptors` table. The env-gated `synthetic` probe is
+    /// intentionally excluded — it has no ProbesConfig entry.
+    public static let knownProbeNames: [String] = ProbesConfig.descriptors.map(\.name)
 
     /// Probes whose alerting is discrete (thermal) or multi-dimensional
     /// (battery, smart, fan) and therefore IGNORE the generic warn/critical
-    /// threshold pair. Mirrors the NOTE comments in `ProbeRegistry`.
-    public static let thresholdIgnoringProbes: Set<String> = [
-        "thermal", "battery", "smart", "fan",
-    ]
+    /// threshold pair. Derived from the descriptor table's `acceptsThresholds`
+    /// flag so it can never drift from the registry's threshold mapping.
+    public static let thresholdIgnoringProbes: Set<String> = Set(
+        ProbesConfig.descriptors.filter { !$0.acceptsThresholds }.map(\.name)
+    )
 
-    /// Read the current override for `name` out of a ProbesConfig.
+    /// Read the current override for `name` out of a ProbesConfig (descriptor
+    /// table; unknown name → a fresh default override).
     static func override(for name: String, in p: ProbesConfig) -> ProbeOverride {
-        switch name {
-        case "disk":        return p.disk
-        case "cpu_temp":    return p.cpuTemp
-        case "thermal":     return p.thermal
-        case "battery":     return p.battery
-        case "smart":       return p.smart
-        case "fan":         return p.fan
-        case "kernel_task": return p.kernelTask
-        case "top_cpu":     return p.topCPU
-        case "top_mem":     return p.topMem
-        case "top_net":     return p.topNet
-        default:            return ProbeOverride()
-        }
+        p[name: name] ?? ProbeOverride()
     }
 
-    /// Write `override` back into the matching ProbesConfig field.
+    /// Write `override` back into the matching ProbesConfig field (descriptor
+    /// table; unknown name → no-op).
     static func setOverride(_ o: ProbeOverride, for name: String, in p: inout ProbesConfig) {
-        switch name {
-        case "disk":        p.disk = o
-        case "cpu_temp":    p.cpuTemp = o
-        case "thermal":     p.thermal = o
-        case "battery":     p.battery = o
-        case "smart":       p.smart = o
-        case "fan":         p.fan = o
-        case "kernel_task": p.kernelTask = o
-        case "top_cpu":     p.topCPU = o
-        case "top_mem":     p.topMem = o
-        case "top_net":     p.topNet = o
-        default:            break
-        }
+        p.setOverride(o, for: name)
     }
 
     // MARK: - Dispatch helpers
@@ -459,14 +521,17 @@ public struct RESTHandlers: Sendable {
     /// arrive as `.int` or `.double` through the hand-rolled `JSONValue`
     /// codec, so accept both; an explicit JSON `null` is treated as absent.
     static func parsePatch(from fields: [String: JSONValue]) -> ProbeConfigPatch {
-        var patch = ProbeConfigPatch()
-        if case .bool(let b)? = fields["enabled"] { patch.enabled = b }
-        patch.warnThreshold = doubleValue(fields["warn_threshold"])
-        patch.criticalThreshold = doubleValue(fields["critical_threshold"])
-        if let poll = doubleValue(fields["poll_interval_sec"]) {
-            patch.pollIntervalSec = Int(poll.rounded())
-        }
-        return patch
+        var enabled: Bool?
+        if case .bool(let b)? = fields["enabled"] { enabled = b }
+        // Carry the raw poll double through UNCONVERTED — `Int(poll.rounded())`
+        // traps for absurd values (1e22). Validation/conversion happens in
+        // `reconfigureProbe` via ConfigSanitizer (→ 400, not a crash).
+        return ProbeConfigPatch(
+            enabled: enabled,
+            warnThreshold: doubleValue(fields["warn_threshold"]),
+            criticalThreshold: doubleValue(fields["critical_threshold"]),
+            pollIntervalSecRaw: doubleValue(fields["poll_interval_sec"])
+        )
     }
 
     /// Coerce a numeric `JSONValue` (`.int` or `.double`) to `Double`. Returns

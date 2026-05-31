@@ -137,6 +137,62 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
         self.topMem = topMem
         self.topNet = topNet
     }
+
+    /// One descriptor per config-known probe — the SINGLE source of truth for
+    /// the probe-name ↔ `ProbeOverride` field mapping. The TOML key, the
+    /// `WritableKeyPath` into this struct, and whether the probe accepts the
+    /// generic warn/critical threshold pair are all spelled ONCE here; every
+    /// other site (`ProbeRegistry.enabledProbeNames`, `RESTHandlers`
+    /// known-names / override / setOverride / threshold-ignoring set) derives
+    /// from this table rather than re-listing the ten names.
+    ///
+    /// `acceptsThresholds == false` ⇒ the probe's alerting is discrete
+    /// (thermal) or multi-dimensional (battery/smart/fan) and a single generic
+    /// warn/critical can't address it, so a threshold sent to it is dropped.
+    /// `@unchecked Sendable`: `WritableKeyPath` isn't `Sendable` in Swift 6,
+    /// but every descriptor here is a compile-time-constant key path into a
+    /// stored property of the `Sendable` `ProbesConfig` value type — a
+    /// stateless path that's safe to read concurrently. The descriptors are
+    /// immutable (`let` fields, a `static let` table), so sharing them across
+    /// actors carries no data race.
+    public struct ProbeDescriptor: @unchecked Sendable {
+        public let name: String
+        public let path: WritableKeyPath<ProbesConfig, ProbeOverride>
+        public let acceptsThresholds: Bool
+    }
+
+    /// The ten descriptors in canonical order. The env-gated `synthetic` probe
+    /// is intentionally absent — it has no `ProbesConfig` entry.
+    public static let descriptors: [ProbeDescriptor] = [
+        ProbeDescriptor(name: "disk",        path: \.disk,       acceptsThresholds: true),
+        ProbeDescriptor(name: "cpu_temp",    path: \.cpuTemp,    acceptsThresholds: true),
+        ProbeDescriptor(name: "thermal",     path: \.thermal,    acceptsThresholds: false),
+        ProbeDescriptor(name: "battery",     path: \.battery,    acceptsThresholds: false),
+        ProbeDescriptor(name: "smart",       path: \.smart,      acceptsThresholds: false),
+        ProbeDescriptor(name: "fan",         path: \.fan,        acceptsThresholds: false),
+        ProbeDescriptor(name: "kernel_task", path: \.kernelTask, acceptsThresholds: true),
+        ProbeDescriptor(name: "top_cpu",     path: \.topCPU,     acceptsThresholds: true),
+        ProbeDescriptor(name: "top_mem",     path: \.topMem,     acceptsThresholds: true),
+        ProbeDescriptor(name: "top_net",     path: \.topNet,     acceptsThresholds: true),
+    ]
+
+    /// Descriptor for a probe name, or nil if not a config-known probe.
+    public static func descriptor(for name: String) -> ProbeDescriptor? {
+        descriptors.first { $0.name == name }
+    }
+
+    /// Read a probe's override by name via the descriptor table.
+    public subscript(name name: String) -> ProbeOverride? {
+        guard let d = Self.descriptor(for: name) else { return nil }
+        return self[keyPath: d.path]
+    }
+
+    /// Write a probe's override by name via the descriptor table (no-op for an
+    /// unknown name).
+    public mutating func setOverride(_ o: ProbeOverride, for name: String) {
+        guard let d = Self.descriptor(for: name) else { return }
+        self[keyPath: d.path] = o
+    }
 }
 
 public struct NotificationsConfig: Sendable, Codable, Equatable {

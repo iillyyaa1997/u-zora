@@ -110,15 +110,37 @@ public actor StateStore {
         }
     }
 
+    /// Outcome of an `acknowledge(_:)` call — distinguishes a freshly-acked
+    /// alert from a no-op (already acked, still firing) and from an unknown id.
+    public enum AckResult: Sendable, Equatable {
+        /// The alert existed, was not previously acked, and is now acked.
+        case acknowledged
+        /// The alert existed but was ALREADY acknowledged — no state change.
+        case alreadyAcknowledged
+        /// No active alert carries that id (cleared, never existed).
+        case notFound
+    }
+
     /// Acknowledge a currently-firing alert by id. UI-state only — this does
     /// NOT touch the OS, only hides the alert from the active set until it
-    /// escalates or clears. Returns `false` if no active alert has that id
-    /// (already cleared, never existed, or already acknowledged-then-cleared).
+    /// escalates or clears. Returns a typed result distinguishing a fresh ack
+    /// from a no-op re-ack and from an unknown id.
+    public func acknowledgeResult(_ id: Alert.ID) -> AckResult {
+        guard activeAlertsByID[id] != nil else { return .notFound }
+        // Re-acking an already-acked, still-firing alert is a no-op: signal
+        // that nothing changed rather than masquerading as a fresh ack.
+        guard !acknowledgedIDs.contains(id) else { return .alreadyAcknowledged }
+        acknowledgedIDs.insert(id)
+        return .acknowledged
+    }
+
+    /// Acknowledge a currently-firing alert by id. UI-state only. Returns
+    /// `true` only for a *fresh* ack — `false` if the id is unknown OR was
+    /// already acknowledged (a no-op). Callers needing to tell those two
+    /// no-change cases apart should use `acknowledgeResult(_:)`.
     @discardableResult
     public func acknowledge(_ id: Alert.ID) -> Bool {
-        guard activeAlertsByID[id] != nil else { return false }
-        acknowledgedIDs.insert(id)
-        return true
+        acknowledgeResult(id) == .acknowledged
     }
 
     /// Replace the registered probe roster (called at boot from

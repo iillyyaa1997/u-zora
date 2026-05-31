@@ -23,6 +23,23 @@ public actor ConfigLoader {
     private var watchSource: DispatchSourceFileSystemObject?
     private var watchedFD: Int32 = -1
 
+    /// Exact TOML text of the most recent `write(_:)`. The file-watcher
+    /// compares an incoming reload's on-disk text against this and SKIPS the
+    /// reload+broadcast when they match byte-for-byte — that event is just our
+    /// own atomic rename echoing back, and broadcasting it would fire the
+    /// hot-reload chain a SECOND time for byte-identical content (every in-app
+    /// reconfigure used to reconfigure twice). A genuine external edit differs
+    /// from this text, so it still reloads normally. Cleared whenever a real
+    /// external reload lands so a later edit reverting to the last-written
+    /// bytes is still observed.
+    private var lastWrittenTOML: String?
+
+    /// Test hook: total number of observer broadcasts performed (both the
+    /// direct `write()` broadcast and watcher-driven reloads). A single
+    /// in-app `write()` must increment this by exactly ONE — the watcher's
+    /// self-write echo is suppressed. Internal — `@testable import`.
+    private(set) var broadcastCount: Int = 0
+
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "config")
 
     /// Construct a loader bound to `configURL` (default:
@@ -68,19 +85,57 @@ public actor ConfigLoader {
 
     /// Re-read the config file from disk, replacing `current`. Returns the
     /// freshly loaded config and broadcasts to every observer.
+    ///
+    /// Always broadcasts — callers that explicitly `reload()` (tests, manual
+    /// refresh) want the observer fire. The file-watcher uses the private
+    /// `reloadFromWatcher()` instead, which suppresses the self-write echo.
     @discardableResult
     public func reload() throws -> UZoraConfig {
         let text = try String(contentsOf: configURL, encoding: .utf8)
         let parsed = try UZoraConfig.fromTOML(text)
         current = parsed
+        // A genuine external edit invalidates the self-write fingerprint: if
+        // the user later re-writes the exact last-written bytes by hand, the
+        // watcher should still observe it.
+        lastWrittenTOML = nil
         log.info("config.toml reloaded")
         broadcast()
         return parsed
     }
 
+    /// Watcher-driven reload. Reads the file; if its text is byte-identical to
+    /// the most recent `write(_:)` (i.e. this event is our own atomic rename
+    /// echoing back), it SKIPS the reload+broadcast so the hot-reload chain
+    /// fires exactly once per in-app write — not twice. A real external edit
+    /// (different bytes) reloads + broadcasts normally.
+    private func reloadFromWatcher() throws {
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+        if let written = lastWrittenTOML, written == text {
+            // Our own write echoing back through the watcher — already
+            // broadcast by write(). Consume the fingerprint (one echo only)
+            // and stay silent.
+            lastWrittenTOML = nil
+            log.debug("config watcher: ignoring self-write echo")
+            return
+        }
+        let parsed = try UZoraConfig.fromTOML(text)
+        current = parsed
+        lastWrittenTOML = nil
+        log.info("config.toml reloaded (external edit)")
+        broadcast()
+    }
+
     /// Persist `config` to disk atomically and update `current`.
+    ///
+    /// Records the exact written TOML so the file-watcher can recognise (and
+    /// suppress) the resulting filesystem event as a self-write echo —
+    /// otherwise every in-app reconfigure would fire the hot-reload chain
+    /// twice (once here, once from the watcher reloading byte-identical
+    /// content).
     public func write(_ config: UZoraConfig) throws {
-        try Self.writeAtomic(config.toTOML(), to: configURL)
+        let toml = config.toTOML()
+        lastWrittenTOML = toml
+        try Self.writeAtomic(toml, to: configURL)
         current = config
         broadcast()
     }
@@ -138,7 +193,9 @@ public actor ConfigLoader {
                 try? await Task.sleep(for: .milliseconds(150))
                 guard let self else { return }
                 do {
-                    try await self.reload()
+                    // Watcher path suppresses the self-write echo (see
+                    // reloadFromWatcher) so an in-app write reconfigures once.
+                    try await self.reloadFromWatcher()
                 } catch {
                     // Reload failed; reset the watcher to the (possibly
                     // freshly created) path so atomic-rename editors stay
@@ -170,6 +227,7 @@ public actor ConfigLoader {
     // MARK: - Helpers
 
     private func broadcast() {
+        broadcastCount += 1
         for (_, callback) in observers {
             callback(current)
         }

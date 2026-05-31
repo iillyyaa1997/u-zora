@@ -133,17 +133,68 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
     /// Apple Silicon firmware tends to ship a subset of these depending on
     /// generation; we read all and take the max valid reading.
     ///
+    /// **CPU-package keys only.** The `Tg*` GPU-die keys were deliberately
+    /// removed: a CPU *package* temp probe must not read GPU sensors, and the
+    /// `Tg05`/`Tg0D` GPU sensors were the very source of the 107-123°C
+    /// crosstalk junk that forced the old tight `< 100` ceiling — which in
+    /// turn made the critical threshold (default 100°C) unreachable, since
+    /// any genuine ≥100°C reading was discarded as "junk". With GPU keys gone
+    /// the ceiling can sit at a realistic Apple-Silicon Tjmax bound (`< 115`).
+    ///
     /// TODO Phase 6: replace this heuristic with `IOReportCopyChannelsInGroup("Thermal", nil)`
     /// once the private-FW dyld + entitlement story is settled.
-    private static let candidateKeys: [String] = [
-        // Apple-Silicon-style die / cluster temps observed on M1/M2/M3.
+    static let candidateKeys: [String] = [
+        // Apple-Silicon-style CPU performance-core die / cluster temps
+        // observed on M1/M2/M3.
         "Tp01", "Tp05", "Tp09", "Tp0D",
-        "Tg05", "Tg0D",
         // Intel-era legacy keys, kept for older hardware that might run
         // a debug build under Rosetta.
         "TC0P", "TC0D", "TC0E", "TC0F",
         "Tc0P", "Tc0D",
     ]
+
+    /// Lower plausibility floor (°C). SMC firmware on Apple Silicon returns
+    /// denormal floats (2.3e-11, 1.4e-18, …) for parked / un-initialised
+    /// performance cores, AND occasionally crosstalk values in the 10-15°C
+    /// range that aren't real package temps either. CPU under any load is
+    /// ≥30°C; ambient room is ~22°C — anything below 20°C is non-physical
+    /// for the silicon.
+    static let plausibilityFloorC: Double = 20
+
+    /// Upper plausibility ceiling (°C). Apple Silicon throttles in the
+    /// ~100-110°C band; 115°C covers a genuine critical-range reading while
+    /// still rejecting obvious junk (≥115°C, e.g. the old GPU-sensor
+    /// crosstalk in the 120s). This must sit ABOVE the default critical
+    /// threshold (100°C) so a critical CPU-temp alert can actually fire.
+    static let plausibilityCeilingC: Double = 115
+
+    /// Pure plausibility filter for a single decoded SMC reading. Returns the
+    /// accepted temperature in °C, or nil if the value is non-physical
+    /// (denormal/parked-core noise below the floor, or junk at/above the
+    /// ceiling). Factored out of `sampleViaSMC()` so the window can be
+    /// unit-tested without live hardware.
+    static func plausibleTemp(type: String, asFloat: Float?, asSP78: Double?, asUInt: UInt32?) -> Double? {
+        let candidate: Double?
+        switch type {
+        case "flt ":
+            if let f = asFloat, f.isFinite {
+                candidate = Double(f)
+            } else {
+                candidate = nil
+            }
+        case "sp78":
+            candidate = asSP78
+        case "ui16", "ui8 ":
+            candidate = asUInt.map(Double.init)
+        default:
+            // Unknown type — skip rather than misinterpret.
+            return nil
+        }
+        guard let t = candidate, t.isFinite,
+              t >= plausibilityFloorC, t < plausibilityCeilingC
+        else { return nil }
+        return t
+    }
 
     public static func sampleViaSMC() -> Sample? {
         guard let conn = IOKitBridge.openSMC() else { return nil }
@@ -153,37 +204,15 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
         for key in candidateKeys {
             guard let val = IOKitBridge.readSMCKey(key, conn: conn) else { continue }
 
-            var tempC: Double?
-            // Plausibility window 20-100°C: SMC firmware on Apple Silicon
-            // returns denormal floats (2.3e-11, 1.4e-18, …) for parked /
-            // un-initialised performance cores, AND occasionally crosstalk
-            // values in the 10-15°C range that aren't real package temps
-            // either. CPU under any load is ≥30°C; ambient room is ~22°C —
-            // anything below 20°C is non-physical for the silicon. Upper
-            // 100°C ceiling rejects junk like 107-123°C that some firmware
-            // returns for parked GPU sensors.
-            switch val.type {
-            case "flt ":
-                if let f = val.asFloat, f.isFinite, f >= 20, f < 100 {
-                    tempC = Double(f)
-                }
-            case "sp78":
-                if let s = val.asSP78, s >= 20, s < 100 {
-                    tempC = s
-                }
-            case "ui16", "ui8 ":
-                if let u = val.asUInt, u >= 20, u < 100 {
-                    tempC = Double(u)
-                }
-            default:
-                // Unknown type — skip rather than misinterpret.
-                continue
-            }
+            guard let t = plausibleTemp(
+                type: val.type,
+                asFloat: val.asFloat,
+                asSP78: val.asSP78,
+                asUInt: val.asUInt
+            ) else { continue }
 
-            if let t = tempC {
-                if best == nil || t > best!.tempC {
-                    best = Sample(tempC: t, sourceKey: key)
-                }
+            if best == nil || t > best!.tempC {
+                best = Sample(tempC: t, sourceKey: key)
             }
         }
         return best

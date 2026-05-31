@@ -51,12 +51,30 @@ public struct PowerProfile: Sendable, Equatable {
     }
 
     /// Compute the effective poll interval for a probe.
+    ///
+    /// Overflow-proof: a hand-edited config can carry an absurd
+    /// `poll_interval_sec` (the read-boundary clamp catches most, but this
+    /// stays saturating regardless). `components.seconds * 1e9` overflows
+    /// Int64 for seconds ≥ ~9.2e9, and `Int64(scaled)` traps once the Double
+    /// exceeds Int64.max. We cap the base-nanos input so seconds × 1e9 ×
+    /// multiplier can never exceed Int64.max, then clamp the scaled Double
+    /// into the representable Int64 range before constructing the Duration.
     public func effectiveInterval(_ base: Duration) -> Duration {
         // Duration is integer-nanoseconds; multiply via Double then clamp.
         let components = base.components
-        let baseNanos = components.seconds * 1_000_000_000 + components.attoseconds / 1_000_000_000
-        let scaled = Double(baseNanos) * pollMultiplier
-        let clamped = max(scaled, 100_000_000) // 100 ms floor — never busy-loop
+        // Cap the seconds so seconds×1e9 can't overflow Int64 even before the
+        // multiplier. Int64.max ≈ 9.22e18 ns ≈ 9.22e9 s; a 24h ceiling (86400s)
+        // is the real config bound, but use a generous 1e9 s hard cap here so
+        // this stays correct for ANY caller, not just config-derived bases.
+        let cappedSeconds = min(max(components.seconds, 0), 1_000_000_000)
+        let baseNanos = cappedSeconds * 1_000_000_000 + components.attoseconds / 1_000_000_000
+        let safeMultiplier = pollMultiplier.isFinite ? max(pollMultiplier, 0) : 1.0
+        let scaled = Double(baseNanos) * safeMultiplier
+        let floored = max(scaled, 100_000_000) // 100 ms floor — never busy-loop
+        // Saturate into the Int64-representable range before converting. The
+        // largest exactly-representable Double below Int64.max is 9.223372036854775e18.
+        let maxNanos = 9_223_372_036_854_775_000.0
+        let clamped = min(floored, maxNanos)
         return .nanoseconds(Int64(clamped))
     }
 

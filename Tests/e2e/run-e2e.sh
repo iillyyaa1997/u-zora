@@ -277,11 +277,14 @@ ACK_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
 [ "$ACK_404_CODE" = "404" ] && pass "ack unknown id returns 404" || fail "ack unknown id returns 404" "got $ACK_404_CODE"
 
 section "MCP write — uzora_ack_alert dispatch"
-# Re-ack the synthetic via MCP (idempotent — still acked → still true).
+# Re-ack the already-acked synthetic via MCP. Corrected contract: a no-op
+# re-ack is NOT a fresh ack — it returns 200 (alert IS acked) but
+# acknowledged=false + already=true so the caller can tell nothing changed.
 MCP_ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"uzora_ack_alert","arguments":{"id":"synthetic:e2e"}}}' "$BASE/mcp")"
-assert_jq   "MCP ack not error"             "$MCP_ACK" '.result.isError' 'false'
-assert_jq   "MCP ack structured ok"         "$MCP_ACK" '.result.structuredContent.acknowledged' 'true'
+assert_jq   "MCP re-ack not error"          "$MCP_ACK" '.result.isError' 'false'
+assert_jq   "MCP re-ack is no-op"           "$MCP_ACK" '.result.structuredContent.acknowledged' 'false'
+assert_jq   "MCP re-ack flags already"      "$MCP_ACK" '.result.structuredContent.already' 'true'
 
 section "REST write — POST /config/probe (disable then re-enable cpu_temp)"
 # Disable cpu_temp; the hot-reload observer must drop it from the registry.

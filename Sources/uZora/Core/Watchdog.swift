@@ -171,16 +171,47 @@ public actor Watchdog {
             events.append(.cleared(id))
         }
 
+        // Did this probe's persisted slice actually change? A *de-escalation*
+        // (critical→warn) yields NO event (the "same/lower severity is silent"
+        // branch) yet the stored Alert changes (lower severity, new
+        // lastUpdated). If we persisted only on `!events.isEmpty` the on-disk
+        // state would keep the stale HIGHER severity and a restart would seed
+        // StateStore wrong. So compute a dirty flag from the slice diff and
+        // persist on ANY change, event or not.
+        let sliceChanged = Self.sliceDiffers(old: previousForProbe, new: currentByID)
+
         // Atomically replace this probe's slice of the persisted snapshot.
         previousAlertsByID = previousAlertsByID.filter { _, a in a.probe != probe }
         for (id, alert) in currentByID {
             previousAlertsByID[id] = alert
         }
 
-        if !events.isEmpty {
+        if sliceChanged {
             persistState()
         }
         return events
+    }
+
+    /// True if the persisted alert slice differs in a way that matters for the
+    /// state restored on the next launch — i.e. the id set changed (add/remove)
+    /// OR an existing id's **severity** changed. Drives the persist decision so
+    /// a silent *de-escalation* (critical→warn, which emits no event) still
+    /// hits disk; otherwise a restart would reload the stale higher severity
+    /// and seed StateStore wrong.
+    ///
+    /// Deliberately compares **severity only**, not the whole `Alert`: a probe
+    /// re-reporting the same alert at the same severity bumps `lastUpdated`
+    /// every tick, and rewriting the state file on every idempotent re-sample
+    /// would be wasteful disk churn (and breaks the documented
+    /// "idempotent tick doesn't rewrite" invariant). Severity is the only
+    /// persisted field the restart-seed logic actually keys on.
+    private static func sliceDiffers(old: [Alert.ID: Alert], new: [Alert.ID: Alert]) -> Bool {
+        if old.count != new.count { return true }
+        for (id, alert) in new {
+            guard let prev = old[id] else { return true }
+            if prev.severity != alert.severity { return true }
+        }
+        return false
     }
 
     /// Full-snapshot step: compare ALL currently-firing alerts (across
@@ -218,10 +249,17 @@ public actor Watchdog {
             events.append(.cleared(id))
         }
 
+        // De-escalation (critical→warn) emits no event but changes the stored
+        // severity — persist on any severity/id change, not just on events, so
+        // a restart doesn't reload a stale higher severity. (See
+        // `sliceDiffers` for why severity-only.)
+        let snapshotChanged = Self.sliceDiffers(old: previousAlertsByID, new: currentByID)
+
         previousAlertsByID = currentByID
-        if !events.isEmpty {
-            // Only persist when the snapshot actually changed; idempotent
-            // ticks (same alerts, same severities) leave the file alone.
+        if snapshotChanged {
+            // Persist when the snapshot's id-set or any severity changed;
+            // idempotent ticks (same alerts, same severities) leave the file
+            // alone.
             persistState()
         }
         return events
@@ -263,5 +301,31 @@ public actor Watchdog {
     /// Snapshot of the currently-stored prior alert state. Read-only.
     public func snapshot() -> [Alert.ID: Alert] {
         previousAlertsByID
+    }
+
+    /// Boot-time reconciliation: drop every persisted alert whose owning probe
+    /// is NOT in `registeredProbeNames`, and return the `.cleared` events for
+    /// the dropped ids (so the caller can ingest them into StateStore /
+    /// EventBus). The persisted slice is rewritten to disk so a relaunch can't
+    /// resurrect the stale alerts.
+    ///
+    /// Mirrors the dropped-probe cleanup `ProbeRegistry.reconfigure(_:)` does
+    /// for a hot-reload, but for the cold-start path: `loadState` applies no
+    /// enabled-filter, so without this a probe the user disabled between runs
+    /// would have its alert seeded into every read surface yet never tick to
+    /// clear it. Returns an empty array (and touches nothing) when every
+    /// persisted alert belongs to a still-registered probe.
+    @discardableResult
+    public func reconcileAgainstRegistered(_ registeredProbeNames: Set<String>) -> [WatchdogEvent] {
+        let droppedProbes = Set(previousAlertsByID.values.map { $0.probe })
+            .subtracting(registeredProbeNames)
+        guard !droppedProbes.isEmpty else { return [] }
+        var clears: [WatchdogEvent] = []
+        for name in droppedProbes.sorted() {
+            // Empty current set for this probe → `.cleared` per outstanding
+            // alert + purge from the persisted slice (step persists the change).
+            clears.append(contentsOf: step(probe: name, currentAlerts: []))
+        }
+        return clears
     }
 }

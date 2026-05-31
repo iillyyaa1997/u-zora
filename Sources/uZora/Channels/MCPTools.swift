@@ -83,9 +83,11 @@ public struct MCPTools: Sendable {
                 if case .bool(let b)? = args["enabled"] { patch.enabled = b }
                 patch.warnThreshold = MCPTools.number(args["warn_threshold"])
                 patch.criticalThreshold = MCPTools.number(args["critical_threshold"])
-                if let poll = MCPTools.number(args["poll_interval_sec"]) {
-                    patch.pollIntervalSec = Int(poll.rounded())
-                }
+                // Carry the raw poll double UNCONVERTED — `Int(poll.rounded())`
+                // traps for absurd values (1e22). `reconfigureProbe` validates
+                // it via ConfigSanitizer and returns an isError result for
+                // out-of-range input rather than crashing the daemon.
+                patch.pollIntervalSecRaw = MCPTools.number(args["poll_interval_sec"])
             }
             let resp = await rest.reconfigureProbe(name: probe, patch: patch)
             return MCPTools.wrap(resp)
@@ -163,11 +165,6 @@ public struct MCPTools: Sendable {
     public func listSchemas() -> [[String: JSONValue]] {
         MCPTools.readSchemas + MCPTools.writeSchemas(allowWrites: rest.allowWrites)
     }
-
-    /// Back-compat alias: the full tool list assuming writes are enabled
-    /// (the default). Prefer the instance `listSchemas()` so the description
-    /// reflects the live `allow_writes` state.
-    public static let schemas: [[String: JSONValue]] = readSchemas + writeSchemas(allowWrites: true)
 
     /// The read-only tools (always available).
     public static let readSchemas: [[String: JSONValue]] = [

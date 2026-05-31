@@ -251,10 +251,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let watchdog = Watchdog(stateURL: watchdogStateURL)
         let eventBus = EventBus()
         let stateStore = StateStore()
-        // Seed StateStore from persisted Watchdog state so /alerts and the
+        // Reconcile persisted Watchdog state against the CURRENT config before
+        // seeding. The watchdog reloads every prior alert (loadState applies no
+        // enabled-filter); if the user disabled a probe between runs, that
+        // probe's persisted alert would otherwise seed StateStore + UIState yet
+        // never tick again (the registry doesn't register a disabled probe), so
+        // it would linger forever in /alerts, /status, MCP, and the popover.
+        // Mirror reconfigure()'s dropped-probe cleanup at boot: synthesise a
+        // clear for each persisted alert whose probe is NOT in the registered
+        // (enabled) set — which both purges the watchdog's on-disk state (so a
+        // relaunch can't resurrect it) and yields the clears to ingest.
+        let registeredNames = Set(await registry.registeredNames())
+        let bootClears = await watchdog.reconcileAgainstRegistered(registeredNames)
+        if !bootClears.isEmpty {
+            // Push the clears through StateStore so any (future) seed/consumer
+            // path stays consistent; the seed below already excludes them.
+            for ev in bootClears { await stateStore.ingest(ev) }
+            log.info("boot reconcile: cleared \(bootClears.count, privacy: .public) persisted alert(s) for disabled probe(s)")
+        }
+        // Seed StateStore from the reconciled Watchdog state so /alerts and the
         // popover surface still-firing alerts immediately on restart —
         // without waiting for fresh `appeared` events (Watchdog correctly
-        // suppresses those when state was loaded from disk).
+        // suppresses those when state was loaded from disk). Only alerts for
+        // still-registered probes survive the reconcile above.
         let persistedAlerts = Array(await watchdog.snapshot().values)
         if !persistedAlerts.isEmpty {
             await stateStore.seedActiveAlerts(persistedAlerts)
@@ -486,16 +505,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         if let s = BatteryProbe.sampleInternalBattery() {
             uiState.recordMetric(probe: "battery", value: Double(s.chargePct))
         }
+        // One ProcessSampler.snapshotAll() per tick — shared by the
+        // memory-pressure %, the top-mem list, and the top-cpu delta. (Was
+        // sampled twice per 5s tick; a full PID walk is not free.)
+        let snaps = ProcessSampler.snapshotAll()
+
         // Memory pressure: rough — used / total %.
         let totalBytes = ProcessSampler.hostTotalMemoryBytes()
         if totalBytes > 0 {
-            let snaps = ProcessSampler.snapshotAll()
             let totalRSS = snaps.reduce(UInt64(0)) { $0 + $1.residentSizeBytes }
             let pct = Double(totalRSS) / Double(totalBytes) * 100
             uiState.recordMetric(probe: "memory", value: min(pct, 100))
         }
-        // Top processes — live computed from ProcessSampler snapshots.
-        let snaps = ProcessSampler.snapshotAll()
 
         // Top memory: 3 largest RSS (skip system kernel_task at PID 0).
         let byMem = snaps

@@ -354,24 +354,26 @@ public actor ProbeRegistry {
 
         // ── disk ──────────────────────────────────────────────────────
         // Config units: PERCENT free (Settings shows "15" meaning 15%).
-        // The probe wants a *fraction* 0..1, so divide by 100.
+        // The probe wants a *fraction* 0..1, so divide by 100. Thresholds are
+        // clamped at this read boundary so a hand-edited config can't inject a
+        // non-finite / out-of-range value.
         if p.disk.enabled {
             let base = DiskFreeProbe.Thresholds.default
             let t = DiskFreeProbe.Thresholds(
-                warnFreeFraction:     p.disk.warnThreshold.map { $0 / 100.0 } ?? base.warnFreeFraction,
-                criticalFreeFraction: p.disk.criticalThreshold.map { $0 / 100.0 } ?? base.criticalFreeFraction
+                warnFreeFraction:     Self.clampedThreshold(p.disk.warnThreshold, unit: .percent, label: "disk.warn_threshold").map { $0 / 100.0 } ?? base.warnFreeFraction,
+                criticalFreeFraction: Self.clampedThreshold(p.disk.criticalThreshold, unit: .percent, label: "disk.critical_threshold").map { $0 / 100.0 } ?? base.criticalFreeFraction
             )
             register(DiskFreeProbe(thresholds: t))
             applyPollOverride(p.disk, name: "disk")
         }
 
         // ── cpu_temp ──────────────────────────────────────────────────
-        // Config units: degrees Celsius — direct.
+        // Config units: degrees Celsius — direct (read-boundary clamped).
         if p.cpuTemp.enabled {
             let base = CPUTempProbe.Thresholds.default
             let t = CPUTempProbe.Thresholds(
-                warnC:     p.cpuTemp.warnThreshold ?? base.warnC,
-                criticalC: p.cpuTemp.criticalThreshold ?? base.criticalC
+                warnC:     Self.clampedThreshold(p.cpuTemp.warnThreshold, unit: .celsius, label: "cpu_temp.warn_threshold") ?? base.warnC,
+                criticalC: Self.clampedThreshold(p.cpuTemp.criticalThreshold, unit: .celsius, label: "cpu_temp.critical_threshold") ?? base.criticalC
             )
             register(CPUTempProbe(thresholds: t))
             applyPollOverride(p.cpuTemp, name: "cpu_temp")
@@ -421,9 +423,9 @@ public actor ProbeRegistry {
         if p.kernelTask.enabled {
             let base = KernelTaskProbe.Thresholds.default
             let t = KernelTaskProbe.Thresholds(
-                warnCpuPct:               p.kernelTask.warnThreshold ?? base.warnCpuPct,
+                warnCpuPct:               Self.clampedThreshold(p.kernelTask.warnThreshold, unit: .percent, label: "kernel_task.warn_threshold") ?? base.warnCpuPct,
                 warnSustainedSeconds:     base.warnSustainedSeconds,
-                criticalCpuPct:           p.kernelTask.criticalThreshold ?? base.criticalCpuPct,
+                criticalCpuPct:           Self.clampedThreshold(p.kernelTask.criticalThreshold, unit: .percent, label: "kernel_task.critical_threshold") ?? base.criticalCpuPct,
                 criticalSustainedSeconds: base.criticalSustainedSeconds
             )
             register(KernelTaskProbe(thresholds: t))
@@ -436,9 +438,9 @@ public actor ProbeRegistry {
         if p.topCPU.enabled {
             let base = TopCPUProcessProbe.Thresholds.default
             let t = TopCPUProcessProbe.Thresholds(
-                warnPct:                  p.topCPU.warnThreshold ?? base.warnPct,
+                warnPct:                  Self.clampedThreshold(p.topCPU.warnThreshold, unit: .percent, label: "top_cpu.warn_threshold") ?? base.warnPct,
                 warnSustainedSeconds:     base.warnSustainedSeconds,
-                criticalPct:              p.topCPU.criticalThreshold ?? base.criticalPct,
+                criticalPct:              Self.clampedThreshold(p.topCPU.criticalThreshold, unit: .percent, label: "top_cpu.critical_threshold") ?? base.criticalPct,
                 criticalSustainedSeconds: base.criticalSustainedSeconds,
                 topN:                     base.topN
             )
@@ -453,12 +455,12 @@ public actor ProbeRegistry {
         // defaults which use 8 * 1024^3 / 16 * 1024^3). topN keeps default.
         if p.topMem.enabled {
             let base = TopMemoryProcessProbe.Thresholds.default
-            let gibToBytes: (Double) -> UInt64 = { gib in
-                UInt64((gib * 1024.0 * 1024.0 * 1024.0).rounded())
-            }
+            // Clamp GiB into 0…1024 at the read boundary, THEN convert (the
+            // conversion is itself trap-guarded, but clamping first keeps the
+            // documented range + a clear log over a silent UInt64.max).
             let t = TopMemoryProcessProbe.Thresholds(
-                warnRssBytes:     p.topMem.warnThreshold.map(gibToBytes) ?? base.warnRssBytes,
-                criticalRssBytes: p.topMem.criticalThreshold.map(gibToBytes) ?? base.criticalRssBytes,
+                warnRssBytes:     Self.clampedThreshold(p.topMem.warnThreshold, unit: .gibibytes, label: "top_mem.warn_threshold").map(Self.gibToBytes) ?? base.warnRssBytes,
+                criticalRssBytes: Self.clampedThreshold(p.topMem.criticalThreshold, unit: .gibibytes, label: "top_mem.critical_threshold").map(Self.gibToBytes) ?? base.criticalRssBytes,
                 topN:             base.topN
             )
             register(TopMemoryProcessProbe(thresholds: t))
@@ -472,13 +474,10 @@ public actor ProbeRegistry {
         // defaults). Sustained-window seconds keep their defaults.
         if p.topNet.enabled {
             let base = TopNetworkProcessProbe.Thresholds.default
-            let mibToBytes: (Double) -> UInt64 = { mib in
-                UInt64((mib * 1024.0 * 1024.0).rounded())
-            }
             let t = TopNetworkProcessProbe.Thresholds(
-                warnBytesPerSec:          p.topNet.warnThreshold.map(mibToBytes) ?? base.warnBytesPerSec,
+                warnBytesPerSec:          Self.clampedThreshold(p.topNet.warnThreshold, unit: .mibPerSec, label: "top_net.warn_threshold").map(Self.mibToBytes) ?? base.warnBytesPerSec,
                 warnSustainedSeconds:     base.warnSustainedSeconds,
-                criticalBytesPerSec:      p.topNet.criticalThreshold.map(mibToBytes) ?? base.criticalBytesPerSec,
+                criticalBytesPerSec:      Self.clampedThreshold(p.topNet.criticalThreshold, unit: .mibPerSec, label: "top_net.critical_threshold").map(Self.mibToBytes) ?? base.criticalBytesPerSec,
                 criticalSustainedSeconds: base.criticalSustainedSeconds
             )
             register(TopNetworkProcessProbe(thresholds: t))
@@ -491,11 +490,51 @@ public actor ProbeRegistry {
     }
 
     /// Record a probe's `poll_interval_sec` override (if any) as a
-    /// `Duration`. Non-positive values are ignored (keep probe default).
+    /// `Duration`. Non-positive values are ignored (keep probe default); a
+    /// value beyond the sane 24h ceiling is clamped (defensive read-boundary
+    /// — the write path already rejects these, but a hand-edited config.toml
+    /// bypasses the write path entirely).
     private func applyPollOverride(_ override: ProbeOverride, name: String) {
         if let sec = override.pollIntervalSec, sec > 0 {
-            configPollOverrides[name] = .seconds(sec)
+            let clamped = ConfigSanitizer.clampPollIntervalSec(sec)
+            configPollOverrides[name] = .seconds(clamped)
         }
+    }
+
+    /// Read-boundary threshold clamp: nil passes through (keep probe default),
+    /// a present value is run through `ConfigSanitizer.clampThreshold` (which
+    /// coerces out-of-range / drops non-finite + logs). Centralises the
+    /// per-probe read-side guard so a hand-edited config can't poison a probe.
+    static func clampedThreshold(_ value: Double?, unit: ConfigSanitizer.ThresholdUnit, label: String) -> Double? {
+        guard let value else { return nil }
+        return ConfigSanitizer.clampThreshold(value, unit: unit, label: label)
+    }
+
+    /// Convert binary GiB → bytes, guarding against trap-inducing inputs.
+    /// `UInt64(double.rounded())` traps on negative, NaN/∞, or values beyond
+    /// `UInt64.max`. A hand-edited config (e.g. top_mem warn_threshold = -1)
+    /// reaches here through the read boundary; rather than crash-loop the
+    /// daemon we clamp to a safe value: negative/NaN → 0, overflow → UInt64.max.
+    static func gibToBytes(_ gib: Double) -> UInt64 {
+        clampToBytes(gib * 1024.0 * 1024.0 * 1024.0)
+    }
+
+    /// Convert binary MiB → bytes/sec, with the same trap guards as
+    /// `gibToBytes`.
+    static func mibToBytes(_ mib: Double) -> UInt64 {
+        clampToBytes(mib * 1024.0 * 1024.0)
+    }
+
+    /// Clamp an already-scaled byte count (Double) into the UInt64 range
+    /// without trapping. The largest exactly-representable Double strictly
+    /// below `UInt64.max` is 1.8446744073709550e19 (UInt64.max itself,
+    /// 1.8446744073709552e19, is not exactly representable and rounds UP past
+    /// the max, so `UInt64(_:)` would trap on it — hence the strict `<` guard).
+    static func clampToBytes(_ value: Double) -> UInt64 {
+        guard value.isFinite, value >= 0 else { return 0 }
+        let maxAsDouble = 18_446_744_073_709_549_568.0 // < UInt64.max, exactly representable
+        if value >= maxAsDouble { return UInt64.max }
+        return UInt64(value.rounded())
     }
 
     /// E2E-only: a deterministic always-firing probe, registered solely
@@ -629,17 +668,13 @@ public actor ProbeRegistry {
     /// across reconfigures untouched.
     static func enabledProbeNames(for config: UZoraConfig) -> Set<String> {
         let p = config.probes
-        var names = Set<String>()
-        if p.disk.enabled       { names.insert("disk") }
-        if p.cpuTemp.enabled    { names.insert("cpu_temp") }
-        if p.thermal.enabled    { names.insert("thermal") }
-        if p.battery.enabled    { names.insert("battery") }
-        if p.smart.enabled      { names.insert("smart") }
-        if p.fan.enabled        { names.insert("fan") }
-        if p.kernelTask.enabled { names.insert("kernel_task") }
-        if p.topCPU.enabled     { names.insert("top_cpu") }
-        if p.topMem.enabled     { names.insert("top_mem") }
-        if p.topNet.enabled     { names.insert("top_net") }
+        // Derive from the single descriptor table — one enabled-check per
+        // descriptor rather than ten hand-spelled `if`s that can drift.
+        var names = Set(
+            ProbesConfig.descriptors
+                .filter { p[keyPath: $0.path].enabled }
+                .map(\.name)
+        )
         // Synthetic probe survives reconfigure if the env var is set.
         if SyntheticAlertProbe.fromEnvironment() != nil {
             names.insert("synthetic")

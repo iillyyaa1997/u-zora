@@ -449,10 +449,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         if let actionRunner {
             let runnerRef = actionRunner
             await eventBus.subscribe { [weak weakState] event in
-                Task { [weak weakState] in
+                // Whole Task isolated to MainActor: actor hops (runnerRef) are
+                // explicit awaits, and weakState is touched on its own actor —
+                // no cross-isolation "sending" (which the macos-15 SDK's
+                // region analyzer flags, unlike the local 26 SDK).
+                Task { @MainActor [weak weakState] in
                     await runnerRef.handleAlertEvent(event)
                     let recent = await runnerRef.recentAudit(20)
-                    await MainActor.run { weakState?.recentActions = recent }
+                    weakState?.recentActions = recent
                 }
             }
         }
@@ -519,10 +523,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let registryRef = registry
         let uiStateForRoster = uiState
         let reconfigureOnReload: ConfigLoader.ReloadCallback = { config in
-            Task {
+            Task { @MainActor in
                 await registryRef.reconfigure(config)
                 let updatedNames = await registryRef.registeredNames()
-                await MainActor.run { uiStateForRoster.probeNames = updatedNames }
+                uiStateForRoster.probeNames = updatedNames
             }
         }
         await loader.observe(reconfigureOnReload, skippingInitial: true)

@@ -57,10 +57,17 @@ struct EventBusTests {
 
     @Test func emitAll_deliversEachInOrder() async {
         let bus = EventBus()
-        actor Recorder {
-            var seen: [String] = []
-            func push(_ s: String) { seen.append(s) }
-            func all() -> [String] { seen }
+        // Synchronous recorder: emitAll delivers to subscribers serially and
+        // synchronously (emitAll -> emit -> for sub: sub.callback(event)), so
+        // recording the label INSIDE the callback preserves emit order. The
+        // earlier version pushed via `Task { await actor.push }`, whose
+        // detached tasks do NOT preserve order — that made this a flaky test
+        // of emitAll's (correct) serial contract, not a real ordering bug.
+        final class Recorder: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _seen: [String] = []
+            func push(_ s: String) { lock.lock(); _seen.append(s); lock.unlock() }
+            func all() -> [String] { lock.lock(); defer { lock.unlock() }; return _seen }
         }
         let rec = Recorder()
         await bus.subscribe { ev in
@@ -70,14 +77,13 @@ struct EventBusTests {
             case .escalated(let a, _): label = "escalate-\(a.id)"
             case .cleared(let id): label = "clear-\(id)"
             }
-            Task { await rec.push(label) }
+            rec.push(label) // synchronous — preserves emitAll's serial order
         }
         let a = alert(.warn)
         let b = alert(.critical)
         await bus.emitAll([.appeared(a), .escalated(b, previousSeverity: .warn), .cleared("disk:x")])
-        try? await Task.sleep(for: .milliseconds(50))
-        let seen = await rec.all()
-        // Order should be preserved (serial emit).
+        let seen = rec.all()
+        // Order is preserved (serial, synchronous emit).
         #expect(seen == ["appear-disk:/", "escalate-disk:/", "clear-disk:x"])
     }
 

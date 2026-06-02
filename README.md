@@ -86,16 +86,34 @@ _Screenshots will land alongside the first signed release — see
 
 ## Installation
 
-### 1. Homebrew cask _(planned)_
+> Distributed **without an Apple Developer ID** (ad-hoc signed, not
+> notarized). Homebrew removes the download quarantine automatically, so
+> the cask is the smoothest path; a bare `.dmg` needs one manual
+> Gatekeeper step (below).
+
+### 1. Homebrew cask _(recommended)_
 
 ```sh
-brew install --cask iillyyaa1997/tap/u-zora  # TBD when first tag ships
+brew install --cask iillyyaa1997/tap/u-zora
 ```
 
-### 2. DMG from Releases _(planned)_
+Update to a newer release at any time with:
+
+```sh
+brew upgrade --cask u-zora
+```
+
+### 2. DMG from Releases
 
 Download the latest `.dmg` from [Releases](https://github.com/iillyyaa1997/u-zora/releases),
-mount, drag `uZora.app` to `/Applications`, and launch.
+mount, and drag `uZora.app` to `/Applications`. Because the app is ad-hoc
+signed (no notarization), Gatekeeper quarantines it on first launch —
+clear it once with either:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/uZora.app   # then open normally
+# …or right-click uZora.app in Finder -> Open -> Open (first launch only)
+```
 
 ### 3. Build from source
 
@@ -300,8 +318,8 @@ Three guarantees enforced by tests (`SmokeIntegration.swift`,
 3. **Watchdog idempotence** — repeating the same alert at the same
    severity produces zero events.
 
-The full SDLC artifact tree (PRD, DESIGN, ADRs) lives in the parent
-`u-pilot/architecture/u-zora/` Cypilot workspace.
+uZora was built with a spec-driven SDLC process; the PRD, DESIGN, and
+ADRs are maintained in a separate workspace.
 
 ## Status
 

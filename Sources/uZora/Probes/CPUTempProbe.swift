@@ -1,27 +1,20 @@
 import Foundation
-import IOKit
 import os
 
-/// Samples CPU package temperature on Apple Silicon.
+/// Samples CPU (SoC) die temperature on Apple Silicon.
 ///
-/// **Approach taken in Phase 2**: probe a list of known SMC thermal keys
-/// (`Tp01`, `Tp09`, `Tg0D`, `Tc0P`, `TC0P`, ...) and take the max reading
-/// as a coarse "package" temperature. These keys are exposed by the
-/// AppleSMC user client without root or special entitlements on real
-/// hardware. On systems where none of these keys answer (early M1, VMs,
-/// future hardware revisions) the probe degrades to a graceful no-op
-/// and logs a one-shot `os_log` warning.
+/// **Approach**: read the on-die temperature sensors exposed by the private
+/// `IOHIDEventSystemClient` API (`AppleARMPMUTempSensor` family) via
+/// `IOHIDThermal`, select the CPU/SoC die sensors, and report their
+/// **average**. This is the only reliable source on Apple Silicon:
+///   - the legacy SMC `Tp*` keys return denormal / crosstalk garbage
+///     (observed 20–99 °C swings on an idle, cool machine), and
+///   - `powermetrics` no longer ships an `smc` sampler or any die temp.
 ///
-/// **NOT used in Phase 2**: the IOReport `Thermal` channel group, which
-/// would give richer per-cluster (`pcluster`, `ecluster`) data, lives in
-/// the private `IOReport.framework` and dyld-loading it from a sandboxed
-/// app needs `com.apple.private.iokit.IOReport` (private entitlement). We
-/// keep that as a Phase 6 follow-up — see `TODO Phase 6` below.
-///
-/// **NOT used in Phase 2**: `powermetrics --samplers smc`, which requires
-/// `sudo` and prompts an authorization dialog every poll — unacceptable
-/// for a 10-second polled probe. Powermetrics integration is reserved
-/// for the on-demand "deep diagnostics" view (Phase 8+).
+/// Read-only, no entitlement, works under ad-hoc signing (verified on
+/// macOS 26 / Apple Silicon). Where the sensors are absent (VMs, future
+/// revisions) the probe abstains (graceful no-op + one-shot warning) — it
+/// never falls back to the unreliable SMC path.
 public final class CPUTempProbe: Probe, @unchecked Sendable {
 
     public let name = "cpu_temp"
@@ -60,7 +53,7 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
     public convenience init(thresholds: Thresholds = .default) {
         self.init(
             thresholds: thresholds,
-            sampler: { Self.sampleViaSMC() },
+            sampler: { Self.sampleViaIOHID() },
             clock: { Date() }
         )
     }
@@ -82,7 +75,7 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
     /// `@testable import`.
     var configuredThresholds: Thresholds { thresholds }
 
-    /// Phase 6: latest CPU package temperature, for sparkline history.
+    /// Latest CPU package temperature, for sparkline history.
     public func currentMetrics() async -> [String: Double] {
         guard let s = sampler() else { return [:] }
         return ["temp_c": s.tempC]
@@ -91,7 +84,7 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
     public func run() async throws -> [Alert] {
         guard let sample = sampler() else {
             if !unavailableLogged {
-                log.warning("CPU temperature probe unavailable on this build — no SMC thermal keys responded. See TODO Phase 6 (IOReport).")
+                log.warning("CPU temperature unavailable — no IOHID temperature sensors responded (VM / unsupported hardware).")
                 unavailableLogged = true
             }
             return []
@@ -127,94 +120,56 @@ public final class CPUTempProbe: Probe, @unchecked Sendable {
         return nil
     }
 
-    // MARK: - SMC sampling
+    // MARK: - IOHID die-sensor selection
 
-    /// Candidate SMC keys for "CPU package temperature", in priority order.
-    /// Apple Silicon firmware tends to ship a subset of these depending on
-    /// generation; we read all and take the max valid reading.
+    /// Lower plausibility bound (°C). IOHID readings are clean, but a parked
+    /// sensor can report ~0; drop anything below this before averaging.
+    static let plausibilityFloorC: Double = 5
+
+    /// Upper plausibility bound (°C). Must sit ABOVE the default critical
+    /// threshold (100 °C) so a genuine critical reading still averages in and
+    /// a critical alert can fire; 120 covers Apple-Silicon Tjmax while
+    /// rejecting obviously broken values.
+    static let plausibilityCeilingC: Double = 120
+
+    /// Whether a HID sensor name denotes a CPU / SoC *die* temperature.
     ///
-    /// **CPU-package keys only.** The `Tg*` GPU-die keys were deliberately
-    /// removed: a CPU *package* temp probe must not read GPU sensors, and the
-    /// `Tg05`/`Tg0D` GPU sensors were the very source of the 107-123°C
-    /// crosstalk junk that forced the old tight `< 100` ceiling — which in
-    /// turn made the critical threshold (default 100°C) unreachable, since
-    /// any genuine ≥100°C reading was discarded as "junk". With GPU keys gone
-    /// the ceiling can sit at a realistic Apple-Silicon Tjmax bound (`< 115`).
-    ///
-    /// TODO Phase 6: replace this heuristic with `IOReportCopyChannelsInGroup("Thermal", nil)`
-    /// once the private-FW dyld + entitlement story is settled.
-    static let candidateKeys: [String] = [
-        // Apple-Silicon-style CPU performance-core die / cluster temps
-        // observed on M1/M2/M3.
-        "Tp01", "Tp05", "Tp09", "Tp0D",
-        // Intel-era legacy keys, kept for older hardware that might run
-        // a debug build under Rosetta.
-        "TC0P", "TC0D", "TC0E", "TC0F",
-        "Tc0P", "Tc0D",
-    ]
-
-    /// Lower plausibility floor (°C). SMC firmware on Apple Silicon returns
-    /// denormal floats (2.3e-11, 1.4e-18, …) for parked / un-initialised
-    /// performance cores, AND occasionally crosstalk values in the 10-15°C
-    /// range that aren't real package temps either. CPU under any load is
-    /// ≥30°C; ambient room is ~22°C — anything below 20°C is non-physical
-    /// for the silicon.
-    static let plausibilityFloorC: Double = 20
-
-    /// Upper plausibility ceiling (°C). Apple Silicon throttles in the
-    /// ~100-110°C band; 115°C covers a genuine critical-range reading while
-    /// still rejecting obvious junk (≥115°C, e.g. the old GPU-sensor
-    /// crosstalk in the 120s). This must sit ABOVE the default critical
-    /// threshold (100°C) so a critical CPU-temp alert can actually fire.
-    static let plausibilityCeilingC: Double = 115
-
-    /// Pure plausibility filter for a single decoded SMC reading. Returns the
-    /// accepted temperature in °C, or nil if the value is non-physical
-    /// (denormal/parked-core noise below the floor, or junk at/above the
-    /// ceiling). Factored out of `sampleViaSMC()` so the window can be
-    /// unit-tested without live hardware.
-    static func plausibleTemp(type: String, asFloat: Float?, asSP78: Double?, asUInt: UInt32?) -> Double? {
-        let candidate: Double?
-        switch type {
-        case "flt ":
-            if let f = asFloat, f.isFinite {
-                candidate = Double(f)
-            } else {
-                candidate = nil
-            }
-        case "sp78":
-            candidate = asSP78
-        case "ui16", "ui8 ":
-            candidate = asUInt.map(Double.init)
-        default:
-            // Unknown type — skip rather than misinterpret.
-            return nil
+    /// Apple's sensor naming varies by generation; this matches the on-die
+    /// families we know — `tdie*` (M3/M4 PMU die temps), `pACC`/`eACC`
+    /// (performance / efficiency clusters) and any explicitly `cpu`-named
+    /// sensor — while excluding battery / NAND / GPU / charger sensors. It is
+    /// conservative on purpose: an unrecognised layout matches nothing
+    /// (→ abstain) rather than averaging in the wrong sensors.
+    static func isCPUDieSensor(_ rawName: String) -> Bool {
+        let n = rawName.lowercased()
+        for bad in ["battery", "gas gauge", "nand", "ssd", "charger", "gpu", "wifi", "airport"] {
+            if n.contains(bad) { return false }
         }
-        guard let t = candidate, t.isFinite,
-              t >= plausibilityFloorC, t < plausibilityCeilingC
-        else { return nil }
-        return t
+        return n.contains("tdie")
+            || n.contains("pacc")
+            || n.contains("eacc")
+            || n.contains("cpu")
     }
 
-    public static func sampleViaSMC() -> Sample? {
-        guard let conn = IOKitBridge.openSMC() else { return nil }
-        defer { IOKitBridge.closeSMC(conn) }
-
-        var best: Sample?
-        for key in candidateKeys {
-            guard let val = IOKitBridge.readSMCKey(key, conn: conn) else { continue }
-
-            guard let t = plausibleTemp(
-                type: val.type,
-                asFloat: val.asFloat,
-                asSP78: val.asSP78,
-                asUInt: val.asUInt
-            ) else { continue }
-
-            if best == nil || t > best!.tempC {
-                best = Sample(tempC: t, sourceKey: key)
-            }
+    /// Pure, testable selection: from named sensor readings, keep the CPU die
+    /// sensors within the plausibility window and return their average as a
+    /// `Sample` (or nil to abstain when none qualify).
+    static func selectCPUTemp(from readings: [(name: String, tempC: Double)]) -> Sample? {
+        let cpu = readings.filter {
+            isCPUDieSensor($0.name)
+                && $0.tempC.isFinite
+                && $0.tempC >= plausibilityFloorC
+                && $0.tempC < plausibilityCeilingC
         }
-        return best
+        guard !cpu.isEmpty else { return nil }
+        let avg = cpu.reduce(0.0) { $0 + $1.tempC } / Double(cpu.count)
+        return Sample(tempC: avg, sourceKey: "IOHID die avg (\(cpu.count) sensors)")
+    }
+
+    /// Live sampler: read IOHID temperature sensors and select the CPU die
+    /// average. Returns nil (abstain) when no sensors are available.
+    public static func sampleViaIOHID() -> Sample? {
+        let readings = IOHIDThermal.readSensors().map { (name: $0.name, tempC: $0.tempC) }
+        return selectCPUTemp(from: readings)
     }
 }

@@ -6,7 +6,7 @@ import Testing
 ///
 /// TODO Phase 7: SMART/CPUTemp tests need recorded fixtures
 /// - CPUTemp: capture a known-good SMC dump on an M1/M2/M3 device and
-///   replay through `CPUTempProbe.sampleViaSMC` with the IOConnect call
+///   replay through `CPUTempProbe.selectCPUTemp` with the IOConnect call
 ///   mocked at the bridge level.
 /// - SMART: capture `IONVMeBlockStorageDevice` property dumps via
 ///   `ioreg -ric IONVMeBlockStorageDevice` on multiple hardware revisions,

@@ -591,7 +591,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         await rehydrateSparklinesFromStore()
 
         // CPU temp.
-        if let s = CPUTempProbe.sampleViaSMC() {
+        if let s = CPUTempProbe.sampleViaIOHID() {
             uiState.recordMetric(probe: "cpu_temp", value: s.tempC)
         }
         // Disk free.

@@ -19,6 +19,7 @@ struct PopoverView: View {
             Divider().padding(.vertical, 6)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    VerdictCard(state: state)
                     activeAlertsSection
                     systemOverviewSection
                     topProcessesSection
@@ -248,6 +249,101 @@ struct PopoverView: View {
 }
 
 // MARK: - Subviews
+
+/// Phase 4 — the proactive-diagnosis Verdict card pinned to the TOP of the
+/// popover (above the alert list; it complements, does not replace, the
+/// alerts — plan D5). One line: a colored dot by level + the headline. When
+/// there are findings, a chevron expands a per-finding drill-down (title +
+/// likely cause + suggested action). The healthy state stays compact.
+private struct VerdictCard: View {
+    @ObservedObject var state: UIState
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            summaryRow
+            if expanded && !state.findings.isEmpty {
+                detailList
+            }
+        }
+        .padding(8)
+        .background(state.verdictTint.opacity(0.10))
+        .cornerRadius(8)
+    }
+
+    /// The always-visible one-liner: dot + headline (+ chevron when there's
+    /// something to drill into).
+    private var summaryRow: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(state.verdictTint)
+                .frame(width: 10, height: 10)
+            Text(state.verdictHeadline)
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .lineLimit(2)
+            Spacer()
+            if !state.findings.isEmpty {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if !state.findings.isEmpty { expanded.toggle() }
+        }
+    }
+
+    /// The drill-down: one row per finding.
+    private var detailList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(state.findings, id: \.id) { finding in
+                FindingDetailRow(finding: finding)
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+/// One finding in the Verdict drill-down: title, likely cause, optional
+/// suggested action. Body is intentionally small (cross-SDK view type-check).
+private struct FindingDetailRow: View {
+    let finding: Finding
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(finding.title)
+                .font(.caption)
+                .fontWeight(.medium)
+            Text(finding.explanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(4)
+            actionLine
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(6)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    @ViewBuilder
+    private var actionLine: some View {
+        if let action = finding.suggestedAction, !action.isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: "wrench.and.screwdriver.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                Text(action)
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .lineLimit(2)
+            }
+            .padding(.top, 1)
+        }
+    }
+}
 
 private struct AlertRow: View {
     let alert: Alert

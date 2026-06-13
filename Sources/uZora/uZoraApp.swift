@@ -74,8 +74,20 @@ private struct MenuBarLabel: View {
         HStack(spacing: 4) {
             Image(systemName: "sunrise.fill")
                 .foregroundStyle(appDelegate.uiState.overallSeverityTint)
+            // Raw-critical probe firing → the existing red "!" (D5: keep it).
             if appDelegate.uiState.overallSeverity == .critical {
                 Text("!")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+            // Diagnosis `problem` verdict → a DISTINCT glyph (D5: "distinct
+            // menu-bar glyph for problem-slowdown vs the raw-critical !").
+            // A red ECG/waveform symbol reads as "diagnosis / something's
+            // wrong with how the Mac is *behaving*", visually unlike the bare
+            // "!" of a single threshold trip. Plain `Image(systemName:)` so it
+            // compiles cross-SDK.
+            if appDelegate.uiState.verdict == .problem {
+                Image(systemName: "waveform.path.ecg")
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
@@ -96,6 +108,13 @@ public final class UIState: ObservableObject {
     @Published public var activeAlerts: [Alert] = []
     @Published public var overallSeverity: Severity? = nil
     @Published public var startedAt: Date = Date()
+
+    // Diagnosis-layer (Phase 4) verdict mirror. The proactive "is my Mac OK?"
+    // aggregate, distinct from the raw `overallSeverity` (which reflects probe
+    // firings). Driven by the DiagnosisEngine cycle via `applyDiagnosis(_:)`.
+    @Published public var verdict: VerdictLevel = .good
+    @Published public var verdictHeadline: String = Verdict.healthyHeadline
+    @Published public var findings: [Finding] = []
 
     /// Process top-5 / top-3 lists for the popover.
     public struct ProcessSnap: Sendable, Equatable {
@@ -144,6 +163,26 @@ public final class UIState: ObservableObject {
         case .some(.info):     return .blue
         case .none:            return .gray
         }
+    }
+
+    /// Color for the diagnosis `Verdict` (popover card dot + menu-bar badge).
+    /// good=green, watch=blue, degraded=orange, problem=red (plan D5).
+    public var verdictTint: Color {
+        switch verdict {
+        case .good:     return .green
+        case .watch:    return .blue
+        case .degraded: return .orange
+        case .problem:  return .red
+        }
+    }
+
+    /// Push a freshly-derived `Verdict` into the observable fields the
+    /// popover Verdict card + menu-bar glyph read. Called once per
+    /// DiagnosisEngine cycle from `AppDelegate.runDiagnosisCycle()`.
+    public func applyDiagnosis(_ v: Verdict) {
+        verdict = v.level
+        verdictHeadline = v.headline
+        findings = v.findings
     }
 
     /// Push the latest snapshot from the StateStore + samplers into the
@@ -200,6 +239,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var metricsStore: MetricsStore?
     private var refreshTimer: Timer?
     private var metricsRetentionTask: Task<Void, Never>?
+    // Diagnosis layer (Phase 4). All optional / nil until bootstrap wires
+    // them; the cycle no-ops when the engine/watchdog are absent (e.g. no
+    // MetricsStore), so it never blocks or breaks startup.
+    private var diagnosisEngine: DiagnosisEngine?
+    private var findingWatchdog: FindingWatchdog?
+    private var diagnosisTimer: Timer?
     // Q10 auto-actions.
     private var actionRegistry: ActionRegistry?
     private var policyEngine: PolicyEngine?
@@ -312,6 +357,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         if let metricsStore {
             await registry.attachMetricsStore(metricsStore)
             startMetricsRetentionLoop(store: metricsStore)
+        }
+
+        // ── Proactive diagnosis layer (Phase 4) ─────────────────────────
+        // Build the engine ONLY when a MetricsStore exists (the detectors
+        // read probe history). Without a store the whole layer stays dormant
+        // — `runDiagnosisCycle()` guard-fails and no-ops, so a store-less
+        // launch (or e2e where history is empty) never blocks or breaks
+        // bootstrap.
+        if let metricsStore {
+            let engine = DiagnosisEngine(
+                detectors: DiagnosisEngine.v1Detectors(),
+                store: metricsStore
+            )
+            // Persist finding state alongside the watchdog state so
+            // diagnosed/resolved events stay idempotent across restarts.
+            // Override via UZORA_FINDINGS_STATE_PATH for isolated E2E/tests
+            // (mirrors the UZORA_WATCHDOG_STATE_PATH block above so the
+            // operator's real finding state is never clobbered).
+            let findingsStateURL: URL?
+            if let envPath = ProcessInfo.processInfo.environment["UZORA_FINDINGS_STATE_PATH"] {
+                findingsStateURL = URL(fileURLWithPath: envPath)
+            } else {
+                let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                findingsStateURL = supportDir?.appendingPathComponent("uZora/findings-state.json")
+            }
+            let fw = FindingWatchdog(stateURL: findingsStateURL)
+            self.diagnosisEngine = engine
+            self.findingWatchdog = fw
+
+            // Seed UIState from persisted findings so the popover Verdict card
+            // + menu-bar glyph reflect a still-active diagnosis immediately on
+            // restart (idempotent — the watchdog suppresses re-`diagnosed`
+            // events for findings restored from disk).
+            let persisted = Array(await fw.snapshot().values)
+            if !persisted.isEmpty {
+                uiState.applyDiagnosis(Verdict.derive(from: persisted))
+            }
         }
 
         let jsonlSink: JSONLEventSink?
@@ -535,6 +617,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // top-N from the live samplers. Phase 5 stops short of SQLite —
         // these are session-local ring buffers.
         startMetricRefresh()
+
+        // Phase 4: drive the proactive diagnosis cycle (engine → watchdog →
+        // verdict → two-track finding notifications). Dormant + no-op until a
+        // store-backed engine exists; never blocks bootstrap.
+        startDiagnosisLoop()
     }
 
     /// Sample probes every 5s for popover-visible metrics (sparklines + top
@@ -553,6 +640,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             Task { @MainActor in
                 guard let self else { return }
                 await self.refreshMetricsAndProcesses()
+            }
+        }
+    }
+
+    /// Phase 4: run a diagnosis cycle every 30s. MIRRORS `startMetricRefresh`
+    /// EXACTLY — a plain `Timer` whose tick spawns a `Task { @MainActor in
+    /// await … }`, which is the proven cross-SDK-safe loop pattern (no
+    /// non-isolated async `Task`, no `Task.detached` touching `@MainActor`
+    /// state). The cycle itself no-ops until the engine + watchdog are wired.
+    @MainActor
+    private func startDiagnosisLoop() {
+        diagnosisTimer?.invalidate()
+        diagnosisTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.runDiagnosisCycle()
+            }
+        }
+    }
+
+    /// One diagnosis cycle: run every detector over loaded history, diff the
+    /// findings against the prior set, push the derived `Verdict` into the
+    /// UI, and emit two-track finding notifications for the diff events.
+    ///
+    /// Degrades gracefully: with no engine/watchdog (e.g. no MetricsStore) it
+    /// returns immediately. Every actor hop is an explicit `await`; the whole
+    /// body runs on the MainActor.
+    @MainActor
+    private func runDiagnosisCycle() async {
+        guard let engine = diagnosisEngine, let fw = findingWatchdog else { return }
+        let findings = await engine.diagnose()
+        let events = await fw.step(currentFindings: findings)
+        uiState.applyDiagnosis(Verdict.derive(from: findings))
+        if let notifs = self.notifications {
+            // Use the SAME notifications config the rest of bootstrap reads.
+            // `bindings` is set early in bootstrap and never cleared, so the
+            // guard is defensive: fall back to defaults if it's somehow nil.
+            let config = self.bindings?.current.notifications ?? NotificationsConfig()
+            for ev in events {
+                _ = await notifs.notifyFinding(event: ev, config: config)
             }
         }
     }
@@ -716,6 +843,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let m = self.metricsStore
         let a = self.auditLog
         metricsRetentionTask?.cancel()
+        diagnosisTimer?.invalidate()
         Task {
             await h?.stop()
             await r?.stop()

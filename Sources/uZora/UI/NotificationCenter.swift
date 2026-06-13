@@ -153,7 +153,109 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
         return content
     }
 
-    /// Pure filter + content builder, factored out so tests can validate
+    /// Phase 4 — post a banner for a diagnosis `FindingEvent` using the
+    /// two-track policy (see `contentIfShouldNotify`). Mirrors
+    /// `notify(event:…)`: builds content via the pure decision fn, installs
+    /// categories, submits the request, and returns the content (or `nil`
+    /// when the event is suppressed — a no-op). Lives in this file so it
+    /// inherits `@preconcurrency import UserNotifications`.
+    @discardableResult
+    public func notifyFinding(event: FindingEvent, config: NotificationsConfig) async -> UNMutableNotificationContent? {
+        guard let content = Self.contentIfShouldNotify(findingEvent: event, config: config) else {
+            return nil
+        }
+
+        installCategories()
+
+        // Identifier: stable per finding id so a rediagnosis updates the
+        // existing banner instead of stacking.
+        let findingID: String
+        switch event {
+        case .diagnosed(let f): findingID = f.id
+        case .rediagnosed(let f, _, _): findingID = f.id
+        case .resolved(let id): findingID = id
+        }
+
+        let req = UNNotificationRequest(
+            identifier: "uzora.finding.\(findingID)",
+            content: content,
+            trigger: nil    // deliver immediately
+        )
+        do {
+            try await center.add(req)
+        } catch {
+            log.error("UN add() failed for finding \(findingID, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+        return content
+    }
+
+    /// Pure two-track finding-notification decision + content builder (plan
+    /// D5 / R1). Factored out so tests validate the policy without a real
+    /// UNUserNotificationCenter (mirrors `contentIfShouldBanner`).
+    ///
+    /// Tracks:
+    ///  - **Resolved / info** → `nil` (no "all-clear" spam; info is advisory).
+    ///  - **Hard track** — a `.critical` finding ALWAYS notifies, immediately
+    ///    and aggressively (`.timeSensitive` + `defaultCritical` sound). No
+    ///    dwell, no confidence gate — a hard critical (disk ≥90%, R1) is never
+    ///    softened by the anti-cry-wolf philosophy.
+    ///  - **Trend track** — a `.warn` finding notifies ONLY at `.high`
+    ///    confidence (the detector's own dwell already gated time; this is the
+    ///    high-confidence edge), with `.active` + default sound. `warn` at
+    ///    `.low`/`.medium` confidence is SUPPRESSED (the "unnamed slowdown"
+    ///    cry-wolf class) → `nil`.
+    public static func contentIfShouldNotify(
+        findingEvent: FindingEvent,
+        config: NotificationsConfig
+    ) -> UNMutableNotificationContent? {
+        let finding: Finding
+        switch findingEvent {
+        case .resolved:
+            return nil
+        case .diagnosed(let f):
+            finding = f
+        case .rediagnosed(let f, _, _):
+            finding = f
+        }
+
+        switch finding.severity {
+        case .critical:
+            // Hard track — always fire.
+            return makeFindingContent(for: finding, interruption: .timeSensitive, sound: .defaultCritical)
+        case .warn:
+            // Trend track — only at the high-confidence edge.
+            guard finding.confidence >= .high else { return nil }
+            return makeFindingContent(for: finding, interruption: .active, sound: .default)
+        case .info:
+            return nil
+        }
+    }
+
+    /// Pure content builder for a diagnosis `Finding`. Exposed (internal) so
+    /// `contentIfShouldNotify` stays declarative; mirrors `makeContent(for:)`.
+    static func makeFindingContent(
+        for finding: Finding,
+        interruption: UNNotificationInterruptionLevel,
+        sound: UNNotificationSound?
+    ) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = finding.title
+        content.body = finding.explanation
+        content.interruptionLevel = interruption
+        content.sound = sound
+        content.categoryIdentifier = NotificationActionMap.diagnosis.categoryID
+        content.userInfo = [
+            "detector": finding.detector,
+            "subject": finding.subject,
+            "severity": finding.severity.rawValue,
+            "confidence": finding.confidence.rawValue,
+            "suggested_action": finding.suggestedAction ?? "",
+            "action_target": NotificationActionMap.diagnosis.targetURL.absoluteString,
+        ]
+        return content
+    }
+
+        /// Pure filter + content builder, factored out so tests can validate
     /// the full mapping without instantiating UNUserNotificationCenter
     /// (which requires a bundle proxy unavailable under `swift test`).
     public static func contentIfShouldBanner(
@@ -270,6 +372,7 @@ public struct NotificationActionMap: Sendable {
     public static let allCategories: [NotificationActionMap] = [
         .disk, .topCPU, .topMem, .topNet, .kernelTask,
         .battery, .cpuTemp, .thermal, .fan, .smart,
+        .diagnosis,
     ]
 
     /// Resolve a category by probe name. Falls back to a generic
@@ -373,5 +476,19 @@ public struct NotificationActionMap: Sendable {
         actionTitle: String(localized: "Show Details", defaultValue: "Show Details"),
         targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
         probeName: "generic"
+    )
+
+    /// Phase 4 diagnosis findings: a dedicated category so finding banners
+    /// carry a "Show in Activity Monitor" action (plan D5 — v1 unfixable
+    /// action = text + "Show in Activity Monitor", NO "Restart Mac" button).
+    /// `probeName` is the synthetic `"diagnosis"` source — findings aren't
+    /// probes, but the field keys the category and (deliberately) is NOT in
+    /// `actionableProbes`, so no Q10 "Run cleanup" button is attached.
+    public static let diagnosis = NotificationActionMap(
+        categoryID: "uzora.cat.diagnosis",
+        actionID: "uzora.act.diagnosis",
+        actionTitle: String(localized: "Show in Activity Monitor", defaultValue: "Show in Activity Monitor"),
+        targetURL: URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"),
+        probeName: "diagnosis"
     )
 }

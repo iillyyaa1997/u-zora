@@ -244,6 +244,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     // MetricsStore), so it never blocks or breaks startup.
     private var diagnosisEngine: DiagnosisEngine?
     private var findingWatchdog: FindingWatchdog?
+    // Phase 5: read-only diagnosis snapshot the channel layer reads
+    // (`GET /findings` + `/verdict`, MCP read tools). Created UNCONDITIONALLY
+    // in bootstrap (even with no MetricsStore → empty/`good`) so channels
+    // always have it; the diagnosis loop is its only writer.
+    private var diagnosisStore: DiagnosisStore?
     private var diagnosisTimer: Timer?
     // Q10 auto-actions.
     private var actionRegistry: ActionRegistry?
@@ -360,6 +365,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         }
 
         // ── Proactive diagnosis layer (Phase 4) ─────────────────────────
+        // Phase 5: create the read-only DiagnosisStore UNCONDITIONALLY so the
+        // channel layer always has a snapshot to serve on `/findings` +
+        // `/verdict` (an un-fed store answers empty + `good`, which is exactly
+        // the correct clean-machine result). The diagnosis loop below — when a
+        // MetricsStore exists — becomes its only writer.
+        let diagnosisStore = DiagnosisStore()
+        self.diagnosisStore = diagnosisStore
+
         // Build the engine ONLY when a MetricsStore exists (the detectors
         // read probe history). Without a store the whole layer stays dormant
         // — `runDiagnosisCycle()` guard-fails and no-ops, so a store-less
@@ -392,7 +405,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             // events for findings restored from disk).
             let persisted = Array(await fw.snapshot().values)
             if !persisted.isEmpty {
-                uiState.applyDiagnosis(Verdict.derive(from: persisted))
+                let seededVerdict = Verdict.derive(from: persisted)
+                uiState.applyDiagnosis(seededVerdict)
+                // Phase 5: seed the channel-readable snapshot too, so a query
+                // immediately after restart reflects the still-active diagnosis
+                // (derive ONCE; UI + store get the same verdict).
+                await diagnosisStore.update(findings: persisted, verdict: seededVerdict)
             }
         }
 
@@ -561,7 +579,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // Global write gate from config — default true (loopback-only).
                 allowWrites: initial.mcp.allowWrites,
                 // Q10: read-only actions surface (/actions + uzora_list_actions).
-                actionRunner: actionRunner
+                actionRunner: actionRunner,
+                // Phase 5: read-only diagnosis surface (/findings + /verdict +
+                // the MCP read tools). Always present (created unconditionally
+                // above); the diagnosis loop feeds it each cycle.
+                diagnosisStore: diagnosisStore
             )
             do {
                 try await host.start()
@@ -672,7 +694,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         guard let engine = diagnosisEngine, let fw = findingWatchdog else { return }
         let findings = await engine.diagnose()
         let events = await fw.step(currentFindings: findings)
-        uiState.applyDiagnosis(Verdict.derive(from: findings))
+        // Derive the verdict ONCE and use it for BOTH surfaces so the popover
+        // (UIState) and the channel snapshot (DiagnosisStore → /findings +
+        // /verdict) can never disagree.
+        let verdict = Verdict.derive(from: findings)
+        uiState.applyDiagnosis(verdict)
+        await diagnosisStore?.update(findings: findings, verdict: verdict)
         if let notifs = self.notifications {
             // Use the SAME notifications config the rest of bootstrap reads.
             // `bindings` is set early in bootstrap and never cleared, so the

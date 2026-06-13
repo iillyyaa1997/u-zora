@@ -65,6 +65,27 @@ public struct MCPTools: Sendable {
             let resp = await rest.metrics(probe: probe, from: fromDate, to: toDate)
             return MCPTools.wrap(resp)
 
+        case "uzora_list_findings":
+            // Read-only (Phase 5, plan D6): the proactive-diagnosis findings —
+            // each a *diagnosed likely cause* (detector, subject, severity,
+            // confidence, plain-language explanation, suggested action),
+            // distinct from the raw probe alerts on uzora_list_alerts. Parses
+            // the optional `severity` floor exactly like uzora_list_alerts.
+            var floor: Severity? = nil
+            if case .object(let args) = arguments,
+               case .string(let s)? = args["severity"] {
+                floor = Severity(rawValue: s)
+            }
+            let resp = await rest.findings(minSeverity: floor)
+            return MCPTools.wrap(resp)
+
+        case "uzora_get_verdict":
+            // Read-only (Phase 5, plan D5/D6): uZora's one-line aggregate
+            // health verdict (good / watch / degraded / problem) + the driving
+            // findings — the proactive "is my Mac OK and why" answer.
+            let resp = await rest.verdict()
+            return MCPTools.wrap(resp)
+
         case "uzora_ack_alert":
             // Write: acknowledge a firing alert. Single-sourced through the
             // same REST handler `POST /alerts/ack` uses; the handler itself
@@ -234,6 +255,28 @@ public struct MCPTools: Sendable {
                     ]),
                 ]),
                 "required": .array([.string("probe")]),
+            ]),
+        ],
+        [
+            "name": .string("uzora_list_findings"),
+            "description": .string("List the proactive-diagnosis findings: each is a likely-cause diagnosis (detector, subject, severity, confidence, plain-language explanation, suggested action), distinct from raw probe alerts. Optionally filter by minimum severity."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "severity": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("info"), .string("warn"), .string("critical")]),
+                        "description": .string("Filter to findings at or above this severity."),
+                    ]),
+                ]),
+            ]),
+        ],
+        [
+            "name": .string("uzora_get_verdict"),
+            "description": .string("Return uZora's one-line aggregate health verdict (good / watch / degraded / problem) plus the driving findings — the proactive 'is my Mac OK and why' answer."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([:]),
             ]),
         ],
         [

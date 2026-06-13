@@ -17,6 +17,10 @@ public actor ChannelHost {
     public let jsonl: JSONLEventSink
     public let metrics: MetricsStore?
     public let actionRunner: ActionRunner?
+    /// Phase 5: read-only diagnosis snapshot backing `GET /findings` +
+    /// `GET /verdict` (+ the MCP read tools). Optional + defaulted to `nil`
+    /// so existing `ChannelHost(...)` call sites + tests compile unchanged.
+    public let diagnosisStore: DiagnosisStore?
     public let httpServer: HTTPServer
     public let rest: RESTHandlers
     public let sse: SSEStream
@@ -36,13 +40,15 @@ public actor ChannelHost {
         metrics: MetricsStore? = nil,
         configLoader: ConfigLoader? = nil,
         allowWrites: Bool = true,
-        actionRunner: ActionRunner? = nil
+        actionRunner: ActionRunner? = nil,
+        diagnosisStore: DiagnosisStore? = nil
     ) {
         self.port = port
         self.state = state
         self.jsonl = jsonl
         self.metrics = metrics
         self.actionRunner = actionRunner
+        self.diagnosisStore = diagnosisStore
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
@@ -51,7 +57,8 @@ public actor ChannelHost {
             metricsStore: metrics,
             configLoader: configLoader,
             allowWrites: allowWrites,
-            actionRunner: actionRunner
+            actionRunner: actionRunner,
+            diagnosisStore: diagnosisStore
         )
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus)
@@ -128,6 +135,13 @@ public actor ChannelHost {
             let from = req.query["from"].flatMap { RESTHandlers.parseISO8601($0) }
             let to = req.query["to"].flatMap { RESTHandlers.parseISO8601($0) }
             return await rest.metrics(probe: probe, name: name, from: from, to: to)
+        }
+        await httpServer.register(method: "GET", path: "/findings") { req in
+            let floor = req.query["severity"].flatMap { Severity(rawValue: $0) }
+            return await rest.findings(minSeverity: floor)
+        }
+        await httpServer.register(method: "GET", path: "/verdict") { _ in
+            await rest.verdict()
         }
         await httpServer.register(method: "POST", path: "/mcp") { req in
             await mcp.handle(req)

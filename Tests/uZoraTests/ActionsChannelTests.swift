@@ -129,8 +129,8 @@ struct ActionsChannelTests {
             return nil
         }
         #expect(names.contains("uzora_list_actions"))
-        // 6 read tools + 2 write tools.
-        #expect(names.count == 8)
+        // 8 read tools (incl. Phase 5 list_findings + get_verdict) + 2 write tools.
+        #expect(names.count == 10)
 
         // Invokes without error and surfaces the four action ids.
         let result = try await tools.invoke(name: "uzora_list_actions", arguments: .object([:]))

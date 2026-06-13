@@ -237,12 +237,14 @@ assert_jq   "initialize serverInfo.name"   "$MCP_INIT" '.result.serverInfo.name'
 
 MCP_TOOLS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$BASE/mcp")"
-# 6 read tools (incl. Q10 uzora_list_actions) + 2 write tools (write tools
-# always listed; allow_writes defaults to true in the harness config).
-assert_jq   "tools/list has 8 tools"       "$MCP_TOOLS" '.result.tools | length' '8'
+# 8 read tools (Q10 uzora_list_actions + Phase 5 list_findings/get_verdict) +
+# 2 write tools (write tools always listed; allow_writes defaults true here).
+assert_jq   "tools/list has 10 tools"      "$MCP_TOOLS" '.result.tools | length' '10'
 assert_contains "tools/list has uzora_status"     "$MCP_TOOLS" 'uzora_status'
 assert_contains "tools/list has uzora_list_alerts" "$MCP_TOOLS" 'uzora_list_alerts'
 assert_contains "tools/list has uzora_list_actions" "$MCP_TOOLS" 'uzora_list_actions'
+assert_contains "tools/list has uzora_list_findings" "$MCP_TOOLS" 'uzora_list_findings'
+assert_contains "tools/list has uzora_get_verdict" "$MCP_TOOLS" 'uzora_get_verdict'
 assert_contains "tools/list has uzora_ack_alert"   "$MCP_TOOLS" 'uzora_ack_alert'
 assert_contains "tools/list has uzora_set_probe_config" "$MCP_TOOLS" 'uzora_set_probe_config'
 

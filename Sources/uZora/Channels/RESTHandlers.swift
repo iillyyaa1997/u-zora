@@ -27,6 +27,14 @@ public struct RESTHandlers: Sendable {
     /// Q10 actions: read-only surface for `GET /actions` + `uzora_list_actions`.
     /// Optional so existing read-only test harnesses build without one.
     public let actionRunner: ActionRunner?
+    /// Phase 5 (diagnosis surface, plan D6): read-only diagnosis snapshot
+    /// backing `GET /findings` + `GET /verdict` (+ the MCP read tools). Optional
+    /// + defaulted to `nil` so every existing `RESTHandlers(...)` call site and
+    /// test compiles unchanged (mirrors `metricsStore`/`actionRunner`); when
+    /// `nil` the endpoints still answer but return an empty/`good` result with
+    /// an explanatory note — the same graceful-degradation pattern `metrics()`
+    /// / `actions()` use when their store isn't wired (e.g. running headless).
+    public let diagnosisStore: DiagnosisStore?
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "rest")
 
@@ -35,13 +43,15 @@ public struct RESTHandlers: Sendable {
         metricsStore: MetricsStore? = nil,
         configLoader: ConfigLoader? = nil,
         allowWrites: Bool = true,
-        actionRunner: ActionRunner? = nil
+        actionRunner: ActionRunner? = nil,
+        diagnosisStore: DiagnosisStore? = nil
     ) {
         self.state = state
         self.metricsStore = metricsStore
         self.configLoader = configLoader
         self.allowWrites = allowWrites
         self.actionRunner = actionRunner
+        self.diagnosisStore = diagnosisStore
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -513,6 +523,81 @@ public struct RESTHandlers: Sendable {
         ), status: 200)
     }
 
+    // MARK: - GET /findings  (Phase 5 — proactive-diagnosis surface, plan D6)
+
+    /// Response for `GET /findings`: the proactive-diagnosis findings (each a
+    /// *diagnosed likely cause* — detector, subject, severity, confidence,
+    /// plain-language explanation, suggested action — distinct from the raw
+    /// probe `Alert`s on `/alerts`). snake_case keys mirror the rest of the
+    /// REST surface. `note` is non-nil only on the degraded (no-store) path.
+    public struct FindingsResponse: Codable, Sendable {
+        public let findings: [Finding]
+        public let count: Int
+        public let note: String?
+        public init(findings: [Finding], note: String? = nil) {
+            self.findings = findings
+            self.count = findings.count
+            self.note = note
+        }
+    }
+
+    /// `GET /findings` — list the current proactive-diagnosis findings, with
+    /// an optional minimum-severity filter. Reads from `diagnosisStore`. When
+    /// no store is wired (e.g. running headless / no MetricsStore) the endpoint
+    /// still answers `200` with an empty list + an explanatory `note`, exactly
+    /// like `metrics()` / `actions()` degrade.
+    public func findings(minSeverity floor: Severity? = nil) async -> HTTPResponse {
+        guard let store = diagnosisStore else {
+            return encode(FindingsResponse(
+                findings: [],
+                note: "diagnosis layer not wired (running headless?)"
+            ), status: 200)
+        }
+        let findings: [Finding]
+        if let floor {
+            findings = await store.findings(minSeverity: floor)
+        } else {
+            findings = await store.findings()
+        }
+        return encode(FindingsResponse(findings: findings), status: 200)
+    }
+
+    // MARK: - GET /verdict  (Phase 5 — aggregate health verdict, plan D5/D6)
+
+    /// Response for `GET /verdict`: uZora's one-line aggregate health verdict
+    /// (good / watch / degraded / problem) plus the driving findings — the
+    /// proactive "is my Mac OK and why" answer. `level` is the `VerdictLevel`
+    /// rawValue; `headline` is the all-clear text or the driving finding's
+    /// title. `note` is non-nil only on the degraded (no-store) path.
+    public struct VerdictResponse: Codable, Sendable {
+        public let level: String
+        public let headline: String
+        public let findings: [Finding]
+        public let count: Int
+        public let note: String?
+        public init(verdict: Verdict, note: String? = nil) {
+            self.level = verdict.level.rawValue
+            self.headline = verdict.headline
+            self.findings = verdict.findings
+            self.count = verdict.findings.count
+            self.note = note
+        }
+    }
+
+    /// `GET /verdict` — return the aggregate diagnosis verdict. Reads
+    /// `diagnosisStore.verdict()`. When no store is wired the endpoint answers
+    /// `200` with the all-clear `good` verdict + an explanatory `note`.
+    public func verdict() async -> HTTPResponse {
+        guard let store = diagnosisStore else {
+            return encode(VerdictResponse(
+                verdict: Verdict(level: .good, headline: Verdict.healthyHeadline, findings: []),
+                note: "diagnosis layer not wired (running headless?)"
+            ), status: 200)
+        }
+        let v = await store.verdict()
+        return encode(VerdictResponse(verdict: v), status: 200)
+    }
+
     // MARK: - Probe name ↔ ProbeOverride keypath mapping
 
     /// The 10 config-known probe names (TOML keys), derived from the single
@@ -561,6 +646,11 @@ public struct RESTHandlers: Sendable {
             let from = request.query["from"].flatMap { Self.parseISO8601($0) }
             let to = request.query["to"].flatMap { Self.parseISO8601($0) }
             return await metrics(probe: probe, name: name, from: from, to: to)
+        case ("GET", "/findings"):
+            let floor = request.query["severity"].flatMap { Severity(rawValue: $0) }
+            return await findings(minSeverity: floor)
+        case ("GET", "/verdict"):
+            return await verdict()
         case ("POST", "/alerts/ack"):
             let id = Self.stringField("id", in: request.body)
             return await acknowledgeAlert(id: id)

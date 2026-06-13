@@ -43,6 +43,7 @@ EVENTS_DIR="$E2E_TMP/events"
 METRICS_DB="$E2E_TMP/metrics.sqlite"
 CONFIG_PATH="$E2E_TMP/config.toml"
 WATCHDOG_STATE="$E2E_TMP/watchdog-state.json"
+FINDINGS_STATE="$E2E_TMP/findings-state.json"
 # Q10: isolate the actions audit log (directory) so the harness never
 # touches the operator's real ~/Library/Application Support/uZora audit.
 ACTIONS_AUDIT_DIR="$E2E_TMP/actions-audit"
@@ -144,6 +145,7 @@ launch_app() {
   UZORA_METRICS_PATH="$METRICS_DB" \
   UZORA_CONFIG_PATH="$CONFIG_PATH" \
   UZORA_WATCHDOG_STATE_PATH="$WATCHDOG_STATE" \
+  UZORA_FINDINGS_STATE_PATH="$FINDINGS_STATE" \
   UZORA_ACTIONS_AUDIT_PATH="$ACTIONS_AUDIT_DIR" \
   UZORA_E2E_SYNTHETIC_ALERT="$mode" \
     "$APP_BUNDLE/Contents/MacOS/uZora" >>"$APP_LOG" 2>&1 &
@@ -289,6 +291,19 @@ if [ -f "$METRICS_DB" ]; then
 else
   fail "metrics.sqlite created" "$METRICS_DB missing"
 fi
+
+# ── Phase 5/6: proactive-diagnosis surface (/findings + /verdict) ─────────────
+# Validate the endpoint CONTRACT (shape), not specific values: on a clean run
+# the engine reads the temp metrics (usually no findings) → empty findings +
+# a `good` verdict, but on a loaded host a real finding could legitimately
+# appear, so assert structure, not emptiness.
+section "Proactive diagnosis — /findings + /verdict"
+FINDINGS_JSON="$(curl -fsS --max-time 3 "$BASE/findings")"
+assert_jq "/findings is a JSON array"          "$FINDINGS_JSON" '.findings | type' 'array'
+assert_jq "/findings count matches array len"  "$FINDINGS_JSON" '.count == (.findings | length)' 'true'
+VERDICT_JSON="$(curl -fsS --max-time 3 "$BASE/verdict")"
+assert_jq "/verdict level is one of the 4"     "$VERDICT_JSON" '.level | test("^(good|watch|degraded|problem)$")' 'true'
+assert_jq "/verdict has a headline"            "$VERDICT_JSON" '.headline | length > 0' 'true'
 
 # Snapshot the synthetic alert's first_seen for the restart-idempotency check.
 # Captured here (before the ack write below) from the earlier /alerts fetch.

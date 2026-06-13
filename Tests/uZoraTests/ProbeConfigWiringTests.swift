@@ -24,12 +24,12 @@ struct ProbeConfigWiringTests {
         let cfg = config { $0.probes.disk.enabled = false }
         let registry = await ProbeRegistry.defaultPopulated(config: cfg)
         let names = await registry.registeredNames()
-        #expect(names.count == 9)
+        #expect(names.count == 10)
         #expect(!names.contains("disk"))
-        // The other nine are still present.
+        // The other ten are still present.
         #expect(names.sorted() == [
             "battery", "cpu_temp", "fan",
-            "kernel_task", "smart", "thermal",
+            "kernel_task", "smart", "system_signals", "thermal",
             "top_cpu", "top_mem", "top_net",
         ])
     }
@@ -42,7 +42,7 @@ struct ProbeConfigWiringTests {
         }
         let registry = await ProbeRegistry.defaultPopulated(config: cfg)
         let names = await registry.registeredNames()
-        #expect(names.count == 7)
+        #expect(names.count == 8)
         #expect(!names.contains("battery"))
         #expect(!names.contains("smart"))
         #expect(!names.contains("fan"))
@@ -213,10 +213,10 @@ struct ProbeConfigWiringTests {
     @Test func nilConfig_keepsAllDefaults() async {
         let registry = await ProbeRegistry.defaultPopulated(config: nil)
         let names = await registry.registeredNames()
-        #expect(names.count == 10)
+        #expect(names.count == 11)
         #expect(names.sorted() == [
             "battery", "cpu_temp", "disk", "fan",
-            "kernel_task", "smart", "thermal",
+            "kernel_task", "smart", "system_signals", "thermal",
             "top_cpu", "top_mem", "top_net",
         ])
         // Default thresholds preserved (disk 0.15 / 0.05; cpu_temp 90 / 100).
@@ -276,7 +276,7 @@ struct ProbeConfigWiringTests {
         // StateStore roster reflects the new set (no disk).
         let roster = await stateStore.probeInventory().map { $0.name }
         #expect(!roster.contains("disk"))
-        #expect(roster.count == 9)
+        #expect(roster.count == 10)
     }
 
     @Test func reconfigure_keepsOtherProbesAlerts() async {
@@ -328,36 +328,112 @@ struct ProbeConfigWiringTests {
         await registry.reconfigure(UZoraConfig.default)
         names = await registry.registeredNames()
         #expect(names.contains("disk"))
-        #expect(names.count == 10)
+        #expect(names.count == 11)
     }
 
     // MARK: - concurrent hot-reload (last-write-wins, no lost update)
 
-    @Test func reconfigure_concurrentReloads_lastWriteWins() async {
-        // Regression: the hot-reload chain fires reconfigure from multiple
-        // detached Tasks (ConfigLoader direct-broadcast + file-watcher reload).
-        // Because the apply has await suspension points, an older config
-        // snapshot used to be able to finish last and win — a lost update that
-        // left a probe dropped despite the on-disk config re-enabling it.
-        // Fire a rapid disable→enable concurrently and assert the terminal
-        // state matches the LAST-submitted (enabled) config.
+    /// Tiny async barrier: the in-flight apply parks here until the test has
+    /// recorded the *newer* config, then is released — making the regression
+    /// interleaving (older apply in-flight while a newer config is recorded
+    /// last) deterministic rather than dependent on parallel-scheduler luck.
+    private actor ApplyBarrier {
+        private var entered: CheckedContinuation<Void, Never>?
+        private var released = false
+        private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+        private var didPark = false
+
+        /// Called from inside the in-flight `applyReconfigure`. Parks ONLY the
+        /// first apply (the disable); later applies (the drained enable) pass
+        /// straight through. Signals that the apply has entered (resuming
+        /// `waitUntilEntered`), then suspends until `release()` is called.
+        func park() async {
+            guard !didPark else { return }
+            didPark = true
+            entered?.resume()
+            entered = nil
+            if released { return }
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                releaseWaiter = c
+            }
+        }
+
+        /// The test awaits this to know the apply is provably parked at the
+        /// barrier (so the next recorded config is guaranteed to land *during*
+        /// the in-flight apply, exercising the real race).
+        func waitUntilEntered() async {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                entered = c
+            }
+        }
+
+        /// Release the parked apply so its drain loop proceeds.
+        func release() {
+            released = true
+            releaseWaiter?.resume()
+            releaseWaiter = nil
+        }
+    }
+
+    /// Regression (deterministic): the hot-reload chain fires `reconfigure`
+    /// from multiple Tasks (ConfigLoader direct-broadcast + file-watcher
+    /// reload). Because `applyReconfigure` has `await` suspension points, an
+    /// *older* config snapshot could finish last and win — a lost update that
+    /// left a probe dropped despite the newer config re-enabling it. The
+    /// drain-loop fix guarantees the **last-RECORDED** pending config wins:
+    /// a config recorded by a concurrent caller *while an apply is in flight*
+    /// is the terminal state; the in-flight older apply never clobbers it.
+    ///
+    /// This forces exactly that interleaving via the test-only barrier:
+    ///   1. Caller A records `disableCfg`, becomes the drainer, enters
+    ///      `applyReconfigure(disableCfg)` and PARKS at the barrier.
+    ///   2. With A provably parked mid-apply, caller B records `enableCfg`
+    ///      (sees `reconfiguring == true`, returns early — `pendingConfig`
+    ///      now holds the NEWER config recorded last).
+    ///   3. The barrier releases; A's drain loop picks up `enableCfg` and
+    ///      applies it last → cpu_temp present.
+    /// The ordering is guaranteed by actor serialization + the barrier, not by
+    /// scheduling luck, so the assertion holds on every parallel run.
+    @Test func reconfigure_concurrentReloads_lastRecordedWins() async {
         let registry = await ProbeRegistry.defaultPopulated(config: UZoraConfig.default)
+        let barrier = ApplyBarrier()
+
+        // The barrier parks ONLY the first apply (the disable); the drained
+        // enable that follows passes straight through (see ApplyBarrier.park).
+        await registry.setApplyReconfigureBarrierForTesting { _ in
+            await barrier.park()
+        }
 
         let disableCfg = config { $0.probes.cpuTemp.enabled = false }
         let enableCfg = UZoraConfig.default // cpu_temp enabled
 
-        // Launch both without awaiting between them so they race on the actor.
-        async let a: Void = registry.reconfigure(disableCfg)
-        async let b: Void = registry.reconfigure(enableCfg)
-        _ = await (a, b)
+        // 1. Start caller A (disable). It records disableCfg, becomes the
+        //    drainer, and parks inside applyReconfigure(disableCfg).
+        let aTask = Task { await registry.reconfigure(disableCfg) }
 
-        // The drain loop guarantees the most-recently-*recorded* pending config
-        // wins. `b`'s argument (enabled) is submitted no earlier than `a`'s, so
-        // the terminal state must include cpu_temp. (Even under interleaving,
-        // the serialized applier never applies a stale snapshot last.)
+        // 2. Wait until A is provably parked mid-apply. Now any config recorded
+        //    by B is guaranteed to land DURING A's in-flight (older) apply —
+        //    the exact lost-update window.
+        await barrier.waitUntilEntered()
+
+        // 3. Caller B records the NEWER (enable) config. A is still parked, so
+        //    `reconfiguring == true` and B records pendingConfig + returns.
+        let bTask = Task { await registry.reconfigure(enableCfg) }
+        _ = await bTask.value // B's record-and-return completes synchronously-ish
+
+        // 4. Release A; its drain loop now applies the last-recorded enableCfg.
+        await barrier.release()
+        _ = await aTask.value
+
+        // Clear the barrier so the registry is left in a clean state.
+        await registry.setApplyReconfigureBarrierForTesting(nil)
+
+        // The last-RECORDED config (enable) is the terminal state; the older
+        // in-flight disable apply did NOT clobber it.
         let names = await registry.registeredNames()
         #expect(names.contains("cpu_temp"))
-        #expect(names.count == 10)
+        #expect(names.count == 11)
     }
 
     @Test func reconfigure_manyRapidReloads_convergesToFinal() async {
@@ -380,7 +456,7 @@ struct ProbeConfigWiringTests {
             await registry.reconfigure(config { $0.probes.disk.enabled = false })
             let names = await registry.registeredNames()
             #expect(!names.contains("disk"))
-            #expect(names.count == 9)
+            #expect(names.count == 10)
         }
     }
 }

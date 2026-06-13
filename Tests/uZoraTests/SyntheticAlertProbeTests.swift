@@ -43,12 +43,12 @@ struct SyntheticAlertProbeTests {
     }
 
     @Test func defaultRegistry_excludesSynthetic_withoutEnv() async {
-        // Default registry must hold exactly the 10 production probes when
+        // Default registry must hold exactly the 11 production probes when
         // the E2E env var is absent.
         if ProcessInfo.processInfo.environment["UZORA_E2E_SYNTHETIC_ALERT"] == nil {
             let registry = await ProbeRegistry.defaultPopulated()
             let names = await registry.registeredNames()
-            #expect(names.count == 10)
+            #expect(names.count == 11)
             #expect(!names.contains("synthetic"))
         }
     }

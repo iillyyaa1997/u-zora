@@ -117,6 +117,8 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
     public var topCPU: ProbeOverride
     public var topMem: ProbeOverride
     public var topNet: ProbeOverride
+    /// Tier-A proactive-diagnosis signal collector (metrics-only, Phase 1).
+    public var systemSignals: ProbeOverride
 
     public init(
         disk: ProbeOverride = ProbeOverride(),
@@ -128,7 +130,8 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
         kernelTask: ProbeOverride = ProbeOverride(),
         topCPU: ProbeOverride = ProbeOverride(),
         topMem: ProbeOverride = ProbeOverride(),
-        topNet: ProbeOverride = ProbeOverride()
+        topNet: ProbeOverride = ProbeOverride(),
+        systemSignals: ProbeOverride = ProbeOverride()
     ) {
         self.disk = disk
         self.cpuTemp = cpuTemp
@@ -140,6 +143,7 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
         self.topCPU = topCPU
         self.topMem = topMem
         self.topNet = topNet
+        self.systemSignals = systemSignals
     }
 
     /// One descriptor per config-known probe — the SINGLE source of truth for
@@ -165,7 +169,7 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
         public let acceptsThresholds: Bool
     }
 
-    /// The ten descriptors in canonical order. The env-gated `synthetic` probe
+    /// The eleven descriptors in canonical order. The env-gated `synthetic` probe
     /// is intentionally absent — it has no `ProbesConfig` entry.
     public static let descriptors: [ProbeDescriptor] = [
         ProbeDescriptor(name: "disk",        path: \.disk,       acceptsThresholds: true),
@@ -178,6 +182,7 @@ public struct ProbesConfig: Sendable, Codable, Equatable {
         ProbeDescriptor(name: "top_cpu",     path: \.topCPU,     acceptsThresholds: true),
         ProbeDescriptor(name: "top_mem",     path: \.topMem,     acceptsThresholds: true),
         ProbeDescriptor(name: "top_net",     path: \.topNet,     acceptsThresholds: true),
+        ProbeDescriptor(name: "system_signals", path: \.systemSignals, acceptsThresholds: false),
     ]
 
     /// Descriptor for a probe name, or nil if not a config-known probe.
@@ -425,6 +430,7 @@ extension UZoraConfig {
                 ("top_cpu", probes.topCPU.toTOMLValue()),
                 ("top_mem", probes.topMem.toTOMLValue()),
                 ("top_net", probes.topNet.toTOMLValue()),
+                ("system_signals", probes.systemSignals.toTOMLValue()),
             ])),
             ("power_profiles", .table([
                 ("ac_open", powerProfiles.acOpen.toTOMLValue()),
@@ -493,6 +499,7 @@ extension UZoraConfig {
             c.probes.topCPU = ProbeOverride(toml: p.value(forKey: "top_cpu"))
             c.probes.topMem = ProbeOverride(toml: p.value(forKey: "top_mem"))
             c.probes.topNet = ProbeOverride(toml: p.value(forKey: "top_net"))
+            c.probes.systemSignals = ProbeOverride(toml: p.value(forKey: "system_signals"))
         }
 
         if let pp = toml.value(forKey: "power_profiles") {

@@ -44,6 +44,16 @@ public actor ProbeRegistry {
     /// `Probe.currentMetricRows()` to the store every poll.
     private var metricsStore: MetricsStore?
 
+    /// Test-only barrier invoked at the START of each `applyReconfigure`
+    /// (before the probe set is rebuilt), with the config that apply is about
+    /// to install. `nil` in production — zero behavior change. A test installs
+    /// it via `setApplyReconfigureBarrierForTesting(_:)` to deterministically
+    /// hold an in-flight apply open while a newer config is recorded by a
+    /// concurrent caller, forcing the exact "older apply in-flight, newer
+    /// config recorded last" interleaving the drain-loop guarantee guards —
+    /// so the lost-update regression test is deterministic, not timing-luck.
+    private var applyReconfigureBarrier: (@Sendable (UZoraConfig) async -> Void)?
+
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "registry")
 
     public init() {}
@@ -212,6 +222,16 @@ public actor ProbeRegistry {
         if let stateStore { self.stateStore = stateStore }
     }
 
+    /// Test affordance: install (or clear) the `applyReconfigure` barrier so a
+    /// test can deterministically suspend an in-flight apply at a known point.
+    /// Internal — `@testable import` only; unused in production. See
+    /// `applyReconfigureBarrier`.
+    func setApplyReconfigureBarrierForTesting(
+        _ barrier: (@Sendable (UZoraConfig) async -> Void)?
+    ) {
+        self.applyReconfigureBarrier = barrier
+    }
+
     private func runProbeOnce(name: String, probe: any Probe) async {
         do {
             let alerts = try await probe.run()
@@ -307,7 +327,7 @@ public actor ProbeRegistry {
     /// from `async` contexts (e.g. app launch) when you need the registry
     /// to be fully populated before the next operation.
     ///
-    /// `config == nil` → register all 10 MVP probes with their built-in
+    /// `config == nil` → register all 11 MVP probes with their built-in
     /// `.default` thresholds and no poll overrides (preserves the legacy
     /// behaviour relied on by unit tests + the E2E synthetic-probe path).
     /// `config != nil` → register only the **enabled** probes, each built
@@ -346,6 +366,7 @@ public actor ProbeRegistry {
             register(TopCPUProcessProbe())
             register(TopMemoryProcessProbe())
             register(TopNetworkProcessProbe())
+            register(SystemSignalsProbe())
             registerSyntheticIfRequested()
             return
         }
@@ -484,6 +505,15 @@ public actor ProbeRegistry {
             applyPollOverride(p.topNet, name: "top_net")
         }
 
+        // ── system_signals ───────────────────────────────────────────
+        // Metrics-only Tier-A diagnosis collector (Phase 1). No warn/critical
+        // thresholds (acceptsThresholds == false in the descriptor); only
+        // enabled + pollInterval apply.
+        if p.systemSignals.enabled {
+            register(SystemSignalsProbe())
+            applyPollOverride(p.systemSignals, name: "system_signals")
+        }
+
         // E2E synthetic probe is NOT part of ProbesConfig — it always
         // registers when the env var is set, regardless of config.
         registerSyntheticIfRequested()
@@ -593,6 +623,10 @@ public actor ProbeRegistry {
     /// `reconfigure(_:)`, so its `await` points can't interleave with another
     /// apply.
     private func applyReconfigure(_ config: UZoraConfig) async {
+        // Test-only deterministic interleaving hook (nil in production).
+        if let barrier = applyReconfigureBarrier {
+            await barrier(config)
+        }
         let wasRunning = isRunning
 
         // 1. Stop current tasks (mirrors stop() but keeps wiring refs).

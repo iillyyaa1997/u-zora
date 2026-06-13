@@ -173,12 +173,12 @@ section "REST /status"
 STATUS="$(curl -fsS --max-time 3 "$BASE/status")"
 assert_jq   "/status status=ok"            "$STATUS" '.status' 'ok'
 assert_jq   "/status power_state present"  "$STATUS" '.power_state | length > 0' 'true'
-# 10 real probes + 1 synthetic = 11 registered.
-assert_jq   "/status probes_registered=11" "$STATUS" '.probes_registered' '11'
+# 11 real probes + 1 synthetic = 12 registered.
+assert_jq   "/status probes_registered=12" "$STATUS" '.probes_registered' '12'
 
 section "REST /probes"
 PROBES="$(curl -fsS --max-time 3 "$BASE/probes")"
-assert_jq   "/probes has 11 entries"       "$PROBES" '.probes | length' '11'
+assert_jq   "/probes has 12 entries"       "$PROBES" '.probes | length' '12'
 assert_contains "/probes includes disk"    "$PROBES" '"disk"'
 assert_contains "/probes includes synthetic" "$PROBES" '"synthetic"'
 
@@ -351,7 +351,7 @@ done
 sleep 1
 
 # Re-enable cpu_temp so config.toml is restored to all-enabled before the
-# restart runs (keeps the probes_registered=11 invariant intact on relaunch).
+# restart runs (keeps the probes_registered=12 invariant intact on relaunch).
 ENABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"probe":"cpu_temp","enabled":true}' "$BASE/config/probe")"
 assert_jq   "re-enable updated=true"        "$ENABLE" '.config.enabled' 'true'

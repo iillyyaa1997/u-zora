@@ -66,7 +66,7 @@ struct SmokeIntegration {
         let registry = await ProbeRegistry.defaultPopulated()
         await registry.start()
         let names = await registry.registeredNames()
-        #expect(names.count == 10)
+        #expect(names.count == 11)
         await registry.stop()
     }
 

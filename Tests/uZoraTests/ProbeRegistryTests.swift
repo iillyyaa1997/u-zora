@@ -5,16 +5,16 @@ import Foundation
 @Suite("ProbeRegistry default factory wiring")
 struct ProbeRegistryTests {
 
-    @Test func defaultPopulated_registersAllTenMvpProbes() async {
+    @Test func defaultPopulated_registersAllMvpProbes() async {
         let registry = await ProbeRegistry.defaultPopulated()
         let names = await registry.registeredNames()
         #expect(names.sorted() == [
             "battery", "cpu_temp", "disk", "fan",
-            "kernel_task", "smart", "thermal",
+            "kernel_task", "smart", "system_signals", "thermal",
             "top_cpu", "top_mem", "top_net",
         ])
         let count = await registry.count
-        #expect(count == 10)
+        #expect(count == 11)
     }
 
     @Test func startIsIdempotent() async {

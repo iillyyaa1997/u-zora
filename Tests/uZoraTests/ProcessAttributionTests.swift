@@ -37,7 +37,7 @@ struct ProcessAttributionTests {
     @Test func parseCPUTime_dayPrefixed() {
         // D-HH:MM:SS — ps emits days as a "D-" prefix for long-lived procs.
         #expect(ProcessAttribution.parseCPUTime("1-00:00:00") == 86_400.0)
-        let dhms: Double = 2 * 86_400 + 1 * 3600 + 2 * 60 + 3
+        let dhms: Double = 176_523  // 2*86400 + 1*3600 + 2*60 + 3
         #expect(ProcessAttribution.parseCPUTime("2-01:02:03") == dhms)
         #expect(ProcessAttribution.parseCPUTime("0-00:00:10") == 10.0)
     }
@@ -131,7 +131,7 @@ struct ProcessAttributionTests {
 
         let mds = byCommand["mds_stores"]
         #expect(mds?.isSystem == true)   // /usr/libexec → system
-        let mdsExpected: Double = 2 * 86_400 + 3 * 3600 + 4 * 60 + 5
+        let mdsExpected: Double = 183_845  // 2*86400 + 3*3600 + 4*60 + 5
         #expect(abs((mds?.cpuSeconds ?? 0) - mdsExpected) < 0.001)
     }
 

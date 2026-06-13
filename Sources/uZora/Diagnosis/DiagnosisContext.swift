@@ -24,9 +24,25 @@ public struct DiagnosisContext: Sendable {
     /// The full window of history the engine loaded, across all probes.
     public let samples: [MetricsStore.Sample]
 
-    public init(now: Date, samples: [MetricsStore.Sample]) {
+    /// The gated Tier-B `/bin/ps` attribution snapshot for THIS cycle, or
+    /// `nil` when no detector requested attribution this cycle OR the `ps`
+    /// shell-out was unavailable (launch/parse failure). A detector that asked
+    /// for attribution but reads `nil` here must degrade gracefully (emit an
+    /// "unnamed" finding rather than going silent — plan D7).
+    public let attributedProcesses: [AttributedProcess]?
+
+    /// - Parameter attributedProcesses: defaults to `nil` so every Phase-2
+    ///   construction site (and the engine's base-context build) compiles
+    ///   unchanged; the engine rebuilds the context with a non-nil value only
+    ///   on the gated attribution path.
+    public init(
+        now: Date,
+        samples: [MetricsStore.Sample],
+        attributedProcesses: [AttributedProcess]? = nil
+    ) {
         self.now = now
         self.samples = samples
+        self.attributedProcesses = attributedProcesses
     }
 
     /// Matching samples for a `(probe, name[, key])` series, ascending by `at`.

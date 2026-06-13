@@ -19,6 +19,7 @@ public actor DiagnosisEngine {
     private let store: MetricsStore?
     private let probes: [String]
     private let clock: @Sendable () -> Date
+    private let attribution: @Sendable () -> [AttributedProcess]?
 
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "diagnosis-engine")
 
@@ -30,16 +31,23 @@ public actor DiagnosisEngine {
     ///     Phase-1 Tier-A signal probe (`"system_signals"`).
     ///   - clock: time source; defaults to `Date()`. Injected in tests for
     ///     deterministic windows.
+    ///   - attribution: the gated Tier-B `/bin/ps` snapshot source. Called at
+    ///     most ONCE per `diagnose()` cycle, and only when some detector's
+    ///     `wantsAttribution(_:)` is true. Defaults to the live
+    ///     `ProcessAttribution.snapshotViaPS()`; injected in tests (often a
+    ///     counter closure) to assert the gating without shelling out.
     public init(
         detectors: [Detector],
         store: MetricsStore?,
         probes: [String] = ["system_signals"],
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        attribution: @escaping @Sendable () -> [AttributedProcess]? = { ProcessAttribution.snapshotViaPS() }
     ) {
         self.detectors = detectors
         self.store = store
         self.probes = probes
         self.clock = clock
+        self.attribution = attribution
     }
 
     /// Default lookback used when there are no detectors (so the `max` over an
@@ -54,9 +62,17 @@ public actor DiagnosisEngine {
         let lookback = detectors.map(\.lookback).max() ?? Self.defaultLookback
         let from = now.addingTimeInterval(-lookback.seconds)
 
+        // Union the base `probes` with every detector's `requiredProbes` so a
+        // detector that needs e.g. `"disk"` history pulls it in automatically.
+        let probesToLoad = Set(probes).union(
+            detectors.reduce(into: Set<String>()) { $0.formUnion($1.requiredProbes) }
+        )
+
         var samples: [MetricsStore.Sample] = []
         if let store {
-            for probe in probes {
+            // Sorted for deterministic load order (purely cosmetic; the
+            // context re-sorts per series by `at`).
+            for probe in probesToLoad.sorted() {
                 do {
                     let rows = try await store.query(probe: probe, from: from, to: now)
                     samples.append(contentsOf: rows)
@@ -69,7 +85,26 @@ public actor DiagnosisEngine {
             }
         }
 
-        let context = DiagnosisContext(now: now, samples: samples)
+        // Build the base (no-attribution) context first; detectors decide over
+        // PURE history whether the gated `ps` snapshot is warranted this cycle.
+        let base = DiagnosisContext(now: now, samples: samples)
+
+        let context: DiagnosisContext
+        if detectors.contains(where: { $0.wantsAttribution(base) }) {
+            // A Tier-A trigger is hot → name the culprit (incl. cross-uid
+            // /System daemons libproc can't see). Called EXACTLY once;
+            // `nil` (launch/parse failure) flows through so the detector emits
+            // an "unnamed slowdown" rather than going silent (plan D7).
+            let attributed = attribution()
+            context = DiagnosisContext(
+                now: now,
+                samples: samples,
+                attributedProcesses: attributed
+            )
+        } else {
+            context = base
+        }
+
         return Self.run(detectors: detectors, context: context)
     }
 

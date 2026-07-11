@@ -15,6 +15,9 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
     public var powerProfiles: PowerProfilesConfig
     /// Q10 auto-actions — per-action opt-in + global safety knobs.
     public var actions: ActionsConfig
+    /// A3a popover-redesign — the active layout preset + optional customized
+    /// layout JSON (`[ui.popover]`).
+    public var ui: UIConfig
 
     public init(
         general: GeneralConfig = GeneralConfig(),
@@ -23,7 +26,8 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         probes: ProbesConfig = ProbesConfig(),
         notifications: NotificationsConfig = NotificationsConfig(),
         powerProfiles: PowerProfilesConfig = PowerProfilesConfig(),
-        actions: ActionsConfig = ActionsConfig()
+        actions: ActionsConfig = ActionsConfig(),
+        ui: UIConfig = UIConfig()
     ) {
         self.general = general
         self.http = http
@@ -32,9 +36,43 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         self.notifications = notifications
         self.powerProfiles = powerProfiles
         self.actions = actions
+        self.ui = ui
     }
 
     public static let `default` = UZoraConfig()
+}
+
+/// `[ui]` config table. Currently only the popover-layout subsection, but a
+/// table so future UI knobs slot in beside it (mirrors the existing
+/// section-per-struct style).
+public struct UIConfig: Sendable, Codable, Equatable {
+    public var popover: PopoverUIConfig
+
+    public init(popover: PopoverUIConfig = PopoverUIConfig()) {
+        self.popover = popover
+    }
+}
+
+/// `[ui.popover]` — how the menu-bar popover is laid out (A3a).
+///
+/// `preset` names one of the built-in `PopoverLayout` presets
+/// (minimal/balanced/diagnosis/power); `layoutJSON` holds a customized
+/// `PopoverLayout` serialized to a JSON string (D-C3.ii — a single scalar the
+/// hand-rolled TOML parser CAN store). Empty `layoutJSON` ⇒ use the preset
+/// as-is; a non-empty value forks the preset. A garbage `layoutJSON` degrades
+/// to "" at the read boundary (`ConfigSanitizer.sanitizeLayoutJSON`), never
+/// crashes — same default-degrading contract as the rest of Config.
+public struct PopoverUIConfig: Sendable, Codable, Equatable {
+    public var preset: String
+    public var layoutJSON: String
+
+    public init(
+        preset: String = PresetName.default.rawValue,
+        layoutJSON: String = ""
+    ) {
+        self.preset = preset
+        self.layoutJSON = layoutJSON
+    }
 }
 
 public struct GeneralConfig: Sendable, Codable, Equatable {
@@ -452,6 +490,15 @@ extension UZoraConfig {
                 ("brew_cleanup", actions.brewCleanup.toTOMLValue()),
                 ("clear_user_caches", actions.clearUserCaches.toTOMLValue()),
             ])),
+            ("ui", .table([
+                ("popover", .table([
+                    ("preset", .string(ui.popover.preset)),
+                    // A customized layout as a compact JSON string (empty ⇒
+                    // use the preset). The TOML emitter escapes the inner
+                    // quotes; the parser reads them back verbatim.
+                    ("layout_json", .string(ui.popover.layoutJSON)),
+                ])),
+            ])),
         ])
     }
 
@@ -530,6 +577,21 @@ extension UZoraConfig {
             c.actions.clearDerivedData = ActionOverride(toml: a.value(forKey: "clear_derived_data"))
             c.actions.brewCleanup = ActionOverride(toml: a.value(forKey: "brew_cleanup"))
             c.actions.clearUserCaches = ActionOverride(toml: a.value(forKey: "clear_user_caches"))
+        }
+
+        if let pop = toml.value(forKey: "ui")?.value(forKey: "popover") {
+            // A non-empty preset name is kept verbatim (an UNKNOWN name is
+            // tolerated here and fails safe to `.minimal` only at render time,
+            // via `effectiveLayout` — so a config from a newer app that names a
+            // preset this build doesn't know isn't clobbered on the next write).
+            if let v = pop.value(forKey: "preset")?.asString, !v.isEmpty {
+                c.ui.popover.preset = v
+            }
+            // A garbage / non-parseable layout_json degrades to "" (use the
+            // preset) at this read boundary — never trapped.
+            if let v = pop.value(forKey: "layout_json")?.asString {
+                c.ui.popover.layoutJSON = ConfigSanitizer.sanitizeLayoutJSON(v)
+            }
         }
 
         self = c

@@ -217,6 +217,19 @@ public enum ConfigSanitizer {
         return value
     }
 
+    /// Sanitize `[ui.popover] layout_json` (A3a) read from disk. Empty stays
+    /// empty (⇒ use the active preset). A non-empty value must parse to a valid
+    /// `PopoverLayout`; a garbage / non-parseable string degrades to "" +
+    /// logged, so a hand-edit can't leave the popover reading from a broken
+    /// layout (it falls back to the preset). Never traps.
+    public static func sanitizeLayoutJSON(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "" }
+        if PopoverLayout(jsonString: trimmed) != nil { return trimmed }
+        log.warning("config: ui.popover.layout_json is not a valid PopoverLayout; ignoring (using preset)")
+        return ""
+    }
+
     // MARK: - Helpers
 
     /// Compact number formatting for error messages (drops a trailing `.0`).

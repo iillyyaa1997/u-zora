@@ -160,10 +160,12 @@ struct PopoverAttentionZoneTests {
         // no longer receives `findings` — and `AttentionBlock` now consumes
         // (findings, alerts). If either signature still required the old shape
         // this would not type-check. Constructing `PopoverView` over both
-        // sources proves the full generic view graph builds.
+        // sources proves the full generic view graph builds. A3a: pass the
+        // `.power` layout (every block + tile visible) so the whole view graph
+        // — including the layout-driven SystemOverview tile switch — is built.
         let demo = DemoDataSource(autostart: false)
-        _ = PopoverView(state: demo)
-        _ = PopoverView(state: UIState())
+        _ = PopoverView(state: demo, layout: .power)
+        _ = PopoverView(state: UIState(), layout: .power)
         // The two fields the slimmed VerdictCard consumes are present.
         #expect(!demo.verdictHeadline.isEmpty)
     }

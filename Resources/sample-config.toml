@@ -198,3 +198,19 @@ auto_enabled = false
 #   rebuild settings after this runs.
 [actions.clear_user_caches]
 auto_enabled = false
+
+# Menu-bar popover layout (A3a).
+[ui.popover]
+# Active layout preset: "minimal" (default), "balanced", "diagnosis", "power".
+#   minimal   — verdict + attention + a lean system-overview (mem-pressure /
+#               CPU / disk). Top processes + recent actions hidden.
+#   balanced  — every block and tile visible.
+#   diagnosis — findings-forward: adds top processes; shows only the
+#               mem-pressure + CPU tiles.
+#   power     — everything on.
+preset = "minimal"
+# Optional customized layout as a compact JSON string. EMPTY ⇒ use the preset
+# above as-is. A non-empty value forks the preset (block order + per-block and
+# per-tile show/hide). A malformed value is ignored (falls back to the preset).
+# Normally written by the Settings "Layout" tab, not hand-edited.
+layout_json = ""

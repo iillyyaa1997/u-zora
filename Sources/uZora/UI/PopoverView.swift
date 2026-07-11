@@ -3,13 +3,17 @@ import Charts
 import AppKit
 
 /// The reorderable content blocks of the popover (the chrome — header +
-/// footer — is fixed and rendered outside this set). A1 renders these in a
-/// hard-coded order via `PopoverView.blockOrder`; persistence / drag-reorder
-/// is a later phase — `blockOrder` is the seam.
+/// footer — is fixed and rendered outside this set). A3a renders these from a
+/// persisted, preset-based `PopoverLayout` (order + per-block visibility)
+/// instead of a hard-coded order.
 ///
-/// `.attention` is the current "Active alerts" block. A1 keeps its rendering
-/// byte-identical; the Attention-zone redesign is a separate later phase.
-enum WidgetKind: String, CaseIterable, Hashable, Sendable {
+/// `Codable` (rawValue) so it serializes inside a `PopoverLayout` JSON string.
+/// The layout codec tolerates an unknown raw value (a block name a newer app
+/// added) by DROPPING it on decode — this enum keeps exactly the five known
+/// cases, so `allCases.count == 5` and render never has to guard an unknown.
+///
+/// `.attention` is the unified Attention zone (A2).
+enum WidgetKind: String, CaseIterable, Codable, Hashable, Sendable {
     case verdict
     case attention
     case systemOverview
@@ -30,11 +34,11 @@ enum WidgetKind: String, CaseIterable, Hashable, Sendable {
 struct PopoverView<Source: PopoverDataSource>: View {
     @ObservedObject var state: Source
 
-    /// A1: fixed content-block order in the shipping order. The reorder /
-    /// persistence seam — a later phase drives this from user config.
-    private let blockOrder: [WidgetKind] = [
-        .verdict, .attention, .systemOverview, .topProcesses, .recentActions,
-    ]
+    /// A3a: the resolved layout (order + per-block/per-tile visibility). A pure
+    /// value passed in by the caller (`effectiveLayout(preset:layoutJSON:)`),
+    /// so the view stays a pure function of `(state, layout)` — the A3b Settings
+    /// preview can hand it an arbitrary layout without a live config.
+    let layout: PopoverLayout
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -46,8 +50,13 @@ struct PopoverView<Source: PopoverDataSource>: View {
             Divider().padding(.vertical, 6)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(blockOrder, id: \.self) { kind in
-                        block(kind)
+                    // Render blocks in the layout's order, skipping hidden ones.
+                    // Unknown kinds were already dropped during layout decode, so
+                    // every `cfg.kind` here is a known `WidgetKind`.
+                    ForEach(Array(layout.blocks.enumerated()), id: \.offset) { (_, cfg) in
+                        if cfg.visible {
+                            block(cfg.kind)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -60,6 +69,12 @@ struct PopoverView<Source: PopoverDataSource>: View {
             )
         }
         .frame(width: 400, height: 500)
+    }
+
+    /// The visible System-overview tiles, in the layout's order — passed to
+    /// `SystemOverviewBlock` so it draws only the enabled tiles.
+    private var visibleTiles: [TileKind] {
+        layout.tiles.filter { $0.visible }.map { $0.kind }
     }
 
     /// Render one content block, populated from `state`. The switch is the
@@ -81,6 +96,7 @@ struct PopoverView<Source: PopoverDataSource>: View {
             )
         case .systemOverview:
             SystemOverviewBlock(
+                tiles: visibleTiles,
                 cpuTempLabel: state.cpuTempLabel,
                 diskFreeLabel: state.diskFreeLabel,
                 batteryLabel: state.batteryLabel,
@@ -301,12 +317,17 @@ func unexplainedAlerts(_ alerts: [Alert], findings: [Finding]) -> [Alert] {
     }
 }
 
-/// System overview: a 2-column grid of four tiles. Three are sparkline
-/// `MetricTile`s (CPU temp / Disk free / Battery); the Memory slot is the
-/// mem-pressure LEVEL indicator (D6) — the CORRECT memory signal, not used%.
-/// The used% `memoryLabel`/`memoryHistory` are kept in the data source for a
-/// later opt-in catalog tile (A4) and are simply no longer read here.
+/// System overview: a 2-column grid of the layout's ENABLED tiles, in the
+/// layout's order (A3a). `cpuTemp` / `diskFree` / `battery` are sparkline
+/// `MetricTile`s; the `memPressureLevel` tile is the mem-pressure LEVEL
+/// indicator (D6) — the CORRECT memory signal, not used%. The used%
+/// `memoryLabel`/`memoryHistory` are kept in the data source for a later
+/// opt-in catalog tile (A4) and are simply no longer read here.
+///
+/// When `tiles` is empty (every tile hidden) the whole section — header
+/// included — renders nothing, so no orphan "System overview" title shows.
 private struct SystemOverviewBlock: View {
+    let tiles: [TileKind]
     let cpuTempLabel: String
     let diskFreeLabel: String
     let batteryLabel: String
@@ -316,31 +337,48 @@ private struct SystemOverviewBlock: View {
     let batteryHistory: [Double]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "System overview", defaultValue: "System overview"))
-                .font(.subheadline)
-                .fontWeight(.semibold)
-            LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 8),
-                GridItem(.flexible(), spacing: 8),
-            ], spacing: 8) {
-                MetricTile(
-                    title: String(localized: "CPU temp", defaultValue: "CPU temp"),
-                    value: cpuTempLabel,
-                    sparkline: cpuTempHistory
-                )
-                MetricTile(
-                    title: String(localized: "Disk free", defaultValue: "Disk free"),
-                    value: diskFreeLabel,
-                    sparkline: diskFreeHistory
-                )
-                MetricTile(
-                    title: String(localized: "Battery", defaultValue: "Battery"),
-                    value: batteryLabel,
-                    sparkline: batteryHistory
-                )
-                MemPressureTile(level: memPressureLevel)
+        if !tiles.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "System overview", defaultValue: "System overview"))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8),
+                ], spacing: 8) {
+                    ForEach(Array(tiles.enumerated()), id: \.offset) { (_, kind) in
+                        tile(kind)
+                    }
+                }
             }
+        }
+    }
+
+    /// One tile, selected by `TileKind`. Each case is a small value-driven
+    /// leaf so the grid stays inside the cross-SDK view type-checker budget.
+    @ViewBuilder
+    private func tile(_ kind: TileKind) -> some View {
+        switch kind {
+        case .cpuTemp:
+            MetricTile(
+                title: String(localized: "CPU temp", defaultValue: "CPU temp"),
+                value: cpuTempLabel,
+                sparkline: cpuTempHistory
+            )
+        case .diskFree:
+            MetricTile(
+                title: String(localized: "Disk free", defaultValue: "Disk free"),
+                value: diskFreeLabel,
+                sparkline: diskFreeHistory
+            )
+        case .battery:
+            MetricTile(
+                title: String(localized: "Battery", defaultValue: "Battery"),
+                value: batteryLabel,
+                sparkline: batteryHistory
+            )
+        case .memPressureLevel:
+            MemPressureTile(level: memPressureLevel)
         }
     }
 }

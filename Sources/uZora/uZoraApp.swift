@@ -46,7 +46,18 @@ private struct PopoverGate: View {
                 // off ⇒ this branch is never taken and behavior is unchanged.
                 DemoPopoverHost(bindings: bindings)
             } else {
-                PopoverView(state: appDelegate.uiState)
+                // A3a: resolve the popover layout (preset + optional customized
+                // JSON) from config and pass it in. `bindings` is observed here,
+                // so a config edit re-evaluates this body → new layout →
+                // hot-reloaded popover. `PopoverView` stays a pure function of
+                // (state, layout) and never reads ConfigBindings itself.
+                PopoverView(
+                    state: appDelegate.uiState,
+                    layout: effectiveLayout(
+                        preset: bindings.current.ui.popover.preset,
+                        layoutJSON: bindings.current.ui.popover.layoutJSON
+                    )
+                )
                     .environmentObject(bindings)
                     // Re-render the popover when the user picks a different
                     // language in Settings — bindings is an ObservableObject,
@@ -67,7 +78,13 @@ private struct DemoPopoverHost: View {
     @StateObject private var demo = DemoDataSource()
     let bindings: ConfigBindings
     var body: some View {
-        PopoverView(state: demo)
+        PopoverView(
+            state: demo,
+            layout: effectiveLayout(
+                preset: bindings.current.ui.popover.preset,
+                layoutJSON: bindings.current.ui.popover.layoutJSON
+            )
+        )
             .environmentObject(bindings)
             .environment(\.locale, resolveLocale(from: bindings.current.general.language))
     }

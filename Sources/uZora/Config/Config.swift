@@ -18,6 +18,10 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
     /// A3a popover-redesign — the active layout preset + optional customized
     /// layout JSON (`[ui.popover]`).
     public var ui: UIConfig
+    /// B3 proactive-push — the shared zero-egress event→agent producer knobs
+    /// (`[push]`). OFF by default; Settings/config-ONLY (no bridge write path
+    /// mutates it — same invariant as `mcp.capabilityToken`).
+    public var push: PushConfig
 
     public init(
         general: GeneralConfig = GeneralConfig(),
@@ -27,7 +31,8 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         notifications: NotificationsConfig = NotificationsConfig(),
         powerProfiles: PowerProfilesConfig = PowerProfilesConfig(),
         actions: ActionsConfig = ActionsConfig(),
-        ui: UIConfig = UIConfig()
+        ui: UIConfig = UIConfig(),
+        push: PushConfig = PushConfig()
     ) {
         self.general = general
         self.http = http
@@ -37,6 +42,7 @@ public struct UZoraConfig: Sendable, Codable, Equatable {
         self.powerProfiles = powerProfiles
         self.actions = actions
         self.ui = ui
+        self.push = push
     }
 
     public static let `default` = UZoraConfig()
@@ -283,6 +289,84 @@ public struct NotificationsConfig: Sendable, Codable, Equatable {
     }
 }
 
+// MARK: - Push (B3 proactive-push)
+
+/// `[push]` config section (plan D-L1 / report 09) — the shared, zero-egress
+/// event→local-agent producer's knobs. **OFF by default**; every backend is
+/// ALSO off by default, so the whole feature is inert until the operator opts
+/// in. Settings/config-ONLY: no bridge write path can mutate it (same invariant
+/// as `mcp.capabilityToken`; a write endpoint only ever touches `probes`).
+///
+/// The **outbound webhook is deliberately EXCLUDED** (D-L1: the dangerous
+/// egress surface). Only two ZERO-EGRESS backends exist: `local-exec` (runs a
+/// fixed-argv local CLI, e.g. `claude -p`, via `ActionShell` — no shell, no
+/// interpolation) and `outbox` (append-only JSONL a local agent tails).
+public struct PushConfig: Sendable, Codable, Equatable {
+    /// Master switch. OFF by default ⇒ no subscriptions, no dispatch.
+    public var enabled: Bool
+    /// Minimum severity that pushes (info/warn/critical). Default `.critical`
+    /// — STRICTER than the banner floor (`.warn`), because a push wakes an
+    /// agent. Below-floor events are dropped before the rate-limiter.
+    public var severityFloor: Severity
+    /// Which event CLASSES push: `alert` (watchdog transitions), `verdict`
+    /// (aggregate verdict-level changes), `finding` (per-diagnosis diffs).
+    /// `finding` is OFF by default (chatty).
+    public var kinds: [String]
+    /// Whether `*.cleared` / `resolved` (a firing condition ending) pushes.
+    /// Default false — resolutions are usually not worth waking an agent.
+    public var pushCleared: Bool
+    /// Per-subject coalescing window (seconds): a repeat push for the same
+    /// subject+kind inside this window is suppressed.
+    public var coolDownSeconds: Int
+    /// Global cap: max dispatched pushes per rolling hour. Over-cap ⇒ dropped +
+    /// audited (never queued).
+    public var rateLimitPerHour: Int
+    /// Consecutive backend failures that auto-disable push + surface once. The
+    /// operator must re-enable (toggle `enabled`).
+    public var circuitBreakerThreshold: Int
+
+    // ── local-exec backend ──
+    /// Enable the local-agent-exec backend.
+    public var execEnabled: Bool
+    /// The FIXED command argv (e.g. `["claude", "-p"]`). The producer APPENDS
+    /// the event-summary string as the FINAL argv token — one argument, never a
+    /// shell string. Empty ⇒ the backend is inert even when `exec_enabled`.
+    public var execArgv: [String]
+
+    // ── outbox backend ──
+    /// Enable the watched-file outbox backend.
+    public var outboxEnabled: Bool
+    /// Directory for the append-only JSONL outbox (`push-outbox-YYYY-MM-DD.jsonl`).
+    /// Empty ⇒ a default under Application Support/uZora. A local agent tails it.
+    public var outboxPath: String
+
+    public init(
+        enabled: Bool = false,
+        severityFloor: Severity = .critical,
+        kinds: [String] = ["alert", "verdict"],
+        pushCleared: Bool = false,
+        coolDownSeconds: Int = 60,
+        rateLimitPerHour: Int = 30,
+        circuitBreakerThreshold: Int = 5,
+        execEnabled: Bool = false,
+        execArgv: [String] = [],
+        outboxEnabled: Bool = false,
+        outboxPath: String = ""
+    ) {
+        self.enabled = enabled
+        self.severityFloor = severityFloor
+        self.kinds = kinds
+        self.pushCleared = pushCleared
+        self.coolDownSeconds = coolDownSeconds
+        self.rateLimitPerHour = rateLimitPerHour
+        self.circuitBreakerThreshold = circuitBreakerThreshold
+        self.execEnabled = execEnabled
+        self.execArgv = execArgv
+        self.outboxEnabled = outboxEnabled
+        self.outboxPath = outboxPath
+    }
+}
+
 /// Per-PowerState override for poll multipliers and severity floors. All
 /// fields optional → fall back to the hard-coded `PowerProfile.defaultMapping`.
 public struct PowerProfileOverride: Sendable, Codable, Equatable {
@@ -525,6 +609,7 @@ extension UZoraConfig {
                     ("layout_json", .string(ui.popover.layoutJSON)),
                 ])),
             ])),
+            ("push", push.toTOMLValue()),
         ])
     }
 
@@ -622,7 +707,67 @@ extension UZoraConfig {
             }
         }
 
+        if let pu = toml.value(forKey: "push") {
+            c.push = PushConfig(toml: pu)
+        }
+
         self = c
+    }
+}
+
+extension PushConfig {
+    /// Parse a `[push]` TOML table into the typed struct. Never throws —
+    /// malformed / out-of-range values degrade to the field default (bad floor
+    /// / garbage kinds / negative numbers all fail safe), same contract as the
+    /// rest of `UZoraConfig`. Numeric knobs are clamped + `kinds` sanitized at
+    /// this READ boundary so a hand-edited config can't disable safety.
+    public init(toml: TOMLValue?) {
+        var p = PushConfig()
+        guard let t = toml else { self = p; return }
+        if let v = t.value(forKey: "enabled")?.asBool { p.enabled = v }
+        if let v = t.value(forKey: "severity_floor")?.asString,
+           let sev = Severity(rawValue: v) {
+            p.severityFloor = sev
+        }
+        if let v = t.value(forKey: "kinds")?.asStringArray {
+            p.kinds = ConfigSanitizer.sanitizePushKinds(v)
+        }
+        if let v = t.value(forKey: "push_cleared")?.asBool { p.pushCleared = v }
+        if let v = t.value(forKey: "cool_down_seconds")?.asInt {
+            p.coolDownSeconds = ConfigSanitizer.clampPushCoolDownSeconds(Int(v))
+        }
+        if let v = t.value(forKey: "rate_limit_per_hour")?.asInt {
+            p.rateLimitPerHour = ConfigSanitizer.clampPushRateLimitPerHour(Int(v))
+        }
+        if let v = t.value(forKey: "circuit_breaker_threshold")?.asInt {
+            p.circuitBreakerThreshold = ConfigSanitizer.clampPushCircuitBreakerThreshold(Int(v))
+        }
+        if let v = t.value(forKey: "exec_enabled")?.asBool { p.execEnabled = v }
+        // `exec_argv` is stored as a native TOML string array (the hand-rolled
+        // parser + emitter both handle string arrays); non-string members are
+        // dropped by `asStringArray`.
+        if let v = t.value(forKey: "exec_argv")?.asStringArray { p.execArgv = v }
+        if let v = t.value(forKey: "outbox_enabled")?.asBool { p.outboxEnabled = v }
+        if let v = t.value(forKey: "outbox_path")?.asString { p.outboxPath = v }
+        self = p
+    }
+
+    /// Emit the `[push]` TOML table. `kinds` + `exec_argv` are native string
+    /// arrays (round-trip through the hand-rolled parser/emitter).
+    public func toTOMLValue() -> TOMLValue {
+        .table([
+            ("enabled", .bool(enabled)),
+            ("severity_floor", .string(severityFloor.rawValue)),
+            ("kinds", .array(kinds.map { .string($0) })),
+            ("push_cleared", .bool(pushCleared)),
+            ("cool_down_seconds", .integer(Int64(coolDownSeconds))),
+            ("rate_limit_per_hour", .integer(Int64(rateLimitPerHour))),
+            ("circuit_breaker_threshold", .integer(Int64(circuitBreakerThreshold))),
+            ("exec_enabled", .bool(execEnabled)),
+            ("exec_argv", .array(execArgv.map { .string($0) })),
+            ("outbox_enabled", .bool(outboxEnabled)),
+            ("outbox_path", .string(outboxPath)),
+        ])
     }
 }
 

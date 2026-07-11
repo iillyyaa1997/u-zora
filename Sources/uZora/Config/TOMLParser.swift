@@ -71,6 +71,15 @@ public enum TOMLValue: Sendable, Equatable {
         return nil
     }
 
+    /// A homogeneous string array (`["a", "b"]`), or nil for a non-array.
+    /// Non-string elements are dropped (a mixed array yields only its string
+    /// members) — the read boundary sanitizes further. An empty array yields
+    /// `[]`, distinct from `nil` (absent / not-an-array).
+    public var asStringArray: [String]? {
+        guard case .array(let a) = self else { return nil }
+        return a.compactMap { $0.asString }
+    }
+
     public var asTable: [(String, TOMLValue)]? {
         if case .table(let t) = self { return t }
         return nil

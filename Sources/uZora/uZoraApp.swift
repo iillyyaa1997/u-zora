@@ -379,6 +379,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var policyEngine: PolicyEngine?
     private var auditLog: AuditLog?
     private var actionRunner: ActionRunner?
+    // B3 proactive-push (plan D-L1): the ONE zero-egress event→local-agent
+    // producer. OFF by default — constructed always, but only STARTED
+    // (subscribed) when `[push] enabled`. Its own push-audit + outbox files.
+    private var proactivePush: ProactivePush?
+    private var pushAuditLog: PushAuditLog?
+    private var pushOutbox: PushOutbox?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -805,6 +811,53 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             }
         }
         await loader.observe(reconfigureOnReload, skippingInitial: true)
+
+        // ── B3 proactive-push (plan D-L1) ───────────────────────────────
+        // The ONE zero-egress event→local-agent producer. Subscribes to BOTH
+        // the WatchdogEvent bus and the DiagnosisEventBus, maps each event to a
+        // unified PushEvent, and (filter → coalesce → rate-limit → dispatch)
+        // pushes via the two ZERO-EGRESS backends (local-exec + outbox). OFF BY
+        // DEFAULT: built unconditionally, but only STARTED when [push] enabled,
+        // so out-of-the-box behavior is unchanged. NO outbound HTTP anywhere.
+        // The [push] config is Settings/config-ONLY (no bridge write mutates it).
+        let pushAudit: PushAuditLog?
+        do {
+            pushAudit = try PushAuditLog(retentionDays: initial.general.logRetentionDays)
+            await pushAudit?.startRotationLoop()
+        } catch {
+            log.error("PushAuditLog init failed: \(String(describing: error), privacy: .public); proactive-push disabled")
+            pushAudit = nil
+        }
+        self.pushAuditLog = pushAudit
+        if let pushAudit {
+            // Build the outbox backend from the config path (a directory; empty
+            // ⇒ default under Application Support). Built regardless of the
+            // enable flag — dispatch gates on `outbox_enabled`.
+            let outboxDir = PushOutbox.resolveDirectory(from: initial.push.outboxPath)
+            let outbox = try? PushOutbox(baseDir: outboxDir, retentionDays: initial.general.logRetentionDays)
+            await outbox?.startRotationLoop()
+            self.pushOutbox = outbox
+
+            let producer = ProactivePush(
+                eventBus: eventBus,
+                diagnosisBus: diagnosisBus,
+                config: initial.push,
+                audit: pushAudit,
+                outbox: outbox
+            )
+            self.proactivePush = producer
+            // Only subscribe when enabled (off by default ⇒ zero behavior change).
+            if initial.push.enabled {
+                await producer.start()
+            }
+            // Hot-reload: flip enabled on ⇒ start, off ⇒ stop; new floor/kinds/
+            // backend flags apply live. Skip the initial synchronous fire (the
+            // producer was just built from `initial`).
+            let producerRef = producer
+            await loader.observe({ config in
+                Task { await producerRef.reconfigure(config.push) }
+            }, skippingInitial: true)
+        }
 
         // Drive a 5s refresh loop that pulls metric sparklines + process
         // top-N from the live samplers. Phase 5 stops short of SQLite —
@@ -1277,6 +1330,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let l = self.loader
         let m = self.metricsStore
         let a = self.auditLog
+        let pp = self.proactivePush
+        let pa = self.pushAuditLog
+        let po = self.pushOutbox
         metricsRetentionTask?.cancel()
         diagnosisTimer?.invalidate()
         sevenDayTimer?.invalidate()
@@ -1287,6 +1343,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             await l?.stopWatching()
             await m?.close()
             await a?.close()
+            await pp?.stop()
+            await pa?.close()
+            await po?.close()
         }
     }
 

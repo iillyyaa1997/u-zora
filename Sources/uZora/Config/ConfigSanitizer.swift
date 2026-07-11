@@ -45,6 +45,35 @@ public enum ConfigSanitizer {
     /// even with the gate "enabled"); ceiling guards the rolling-counter math.
     public static let rateLimitPerHourRange: ClosedRange<Int> = 1...1_000
 
+    // MARK: - Push (B3 proactive-push) numeric ranges
+
+    /// `[push] cool_down_seconds` — the per-subject coalescing window. 0
+    /// disables the wait (every distinct event dispatches); the ceiling (1 day)
+    /// keeps a hand-edit from setting an effectively-infinite suppression and
+    /// stays well clear of the `TimeInterval` math.
+    public static let pushCoolDownSecondsRange: ClosedRange<Int> = 0...86_400
+
+    /// `[push] rate_limit_per_hour` — global cap on dispatched pushes per
+    /// rolling hour. Floor of 1 so a positive cap is meaningful (0 would drop
+    /// every push while reading as "enabled"); ceiling guards the rolling
+    /// counter.
+    public static let pushRateLimitPerHourRange: ClosedRange<Int> = 1...10_000
+
+    /// `[push] circuit_breaker_threshold` — consecutive backend failures that
+    /// auto-disable push. Floor of 1 (a threshold of 0 would trip before the
+    /// first attempt, making push permanently self-disabling); ceiling keeps a
+    /// hand-edit sane.
+    public static let pushCircuitBreakerRange: ClosedRange<Int> = 1...1_000
+
+    /// The event CLASSES `[push] kinds` may name. `alert` = watchdog alert
+    /// transitions, `verdict` = aggregate verdict-level changes, `finding` =
+    /// individual diagnosis diffs (chatty; off by default).
+    public static let validPushKinds: Set<String> = ["alert", "verdict", "finding"]
+
+    /// The default `[push] kinds` — used when a hand-edit leaves the list empty
+    /// or all-garbage.
+    public static let defaultPushKinds: [String] = ["alert", "verdict"]
+
     /// Per-unit sane upper bounds for a probe's warn/critical threshold. The
     /// lower bound is always 0 (negative thresholds are nonsensical for every
     /// probe unit here and underflow the UInt64 conversions).
@@ -194,6 +223,72 @@ public enum ConfigSanitizer {
             return rateLimitPerHourRange.upperBound
         }
         return perHour
+    }
+
+    /// Clamp `[push] cool_down_seconds` read from disk into its safe range. A
+    /// hand-edited negative / absurd value is coerced + logged rather than
+    /// breaking the coalescing math.
+    public static func clampPushCoolDownSeconds(_ seconds: Int) -> Int {
+        if seconds < pushCoolDownSecondsRange.lowerBound {
+            log.warning("config: push.cool_down_seconds=\(seconds, privacy: .public) below floor; clamping to \(pushCoolDownSecondsRange.lowerBound, privacy: .public)")
+            return pushCoolDownSecondsRange.lowerBound
+        }
+        if seconds > pushCoolDownSecondsRange.upperBound {
+            log.warning("config: push.cool_down_seconds=\(seconds, privacy: .public) above ceiling; clamping to \(pushCoolDownSecondsRange.upperBound, privacy: .public)")
+            return pushCoolDownSecondsRange.upperBound
+        }
+        return seconds
+    }
+
+    /// Clamp `[push] rate_limit_per_hour` read from disk into its safe range. A
+    /// non-positive value (which would silently drop every push while reading
+    /// as "enabled") is coerced up to the floor + logged.
+    public static func clampPushRateLimitPerHour(_ perHour: Int) -> Int {
+        if perHour < pushRateLimitPerHourRange.lowerBound {
+            log.warning("config: push.rate_limit_per_hour=\(perHour, privacy: .public) below floor; clamping to \(pushRateLimitPerHourRange.lowerBound, privacy: .public)")
+            return pushRateLimitPerHourRange.lowerBound
+        }
+        if perHour > pushRateLimitPerHourRange.upperBound {
+            log.warning("config: push.rate_limit_per_hour=\(perHour, privacy: .public) above ceiling; clamping to \(pushRateLimitPerHourRange.upperBound, privacy: .public)")
+            return pushRateLimitPerHourRange.upperBound
+        }
+        return perHour
+    }
+
+    /// Clamp `[push] circuit_breaker_threshold` read from disk into its safe
+    /// range. A non-positive value (which would trip the breaker before the
+    /// first attempt) is coerced up to the floor + logged.
+    public static func clampPushCircuitBreakerThreshold(_ threshold: Int) -> Int {
+        if threshold < pushCircuitBreakerRange.lowerBound {
+            log.warning("config: push.circuit_breaker_threshold=\(threshold, privacy: .public) below floor; clamping to \(pushCircuitBreakerRange.lowerBound, privacy: .public)")
+            return pushCircuitBreakerRange.lowerBound
+        }
+        if threshold > pushCircuitBreakerRange.upperBound {
+            log.warning("config: push.circuit_breaker_threshold=\(threshold, privacy: .public) above ceiling; clamping to \(pushCircuitBreakerRange.upperBound, privacy: .public)")
+            return pushCircuitBreakerRange.upperBound
+        }
+        return threshold
+    }
+
+    /// Sanitize `[push] kinds` read from disk. Keeps only recognized event
+    /// classes (`validPushKinds`), de-dupes while preserving order, and — if the
+    /// result is empty (all-garbage / hand-cleared) — falls back to
+    /// `defaultPushKinds` + logs, so a bad edit can't silently push nothing OR
+    /// push an unknown class. Never traps.
+    public static func sanitizePushKinds(_ kinds: [String]) -> [String] {
+        var seen: Set<String> = []
+        var out: [String] = []
+        for k in kinds where validPushKinds.contains(k) && !seen.contains(k) {
+            seen.insert(k)
+            out.append(k)
+        }
+        if out.isEmpty {
+            if !kinds.isEmpty {
+                log.warning("config: push.kinds has no recognized entries; falling back to default \(defaultPushKinds.joined(separator: ","), privacy: .public)")
+            }
+            return defaultPushKinds
+        }
+        return out
     }
 
     /// Clamp a threshold read from disk into `0…unit.upperBound`. A

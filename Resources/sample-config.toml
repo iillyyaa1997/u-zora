@@ -229,3 +229,55 @@ preset = "minimal"
 # per-tile show/hide). A malformed value is ignored (falls back to the preset).
 # Normally written by the Settings "Layout" tab, not hand-edited.
 layout_json = ""
+
+# ──────────────────────────────────────────────────────────────────────────
+# Proactive push (B3) — turn uZora events into proactive notifications to a
+# LOCAL agent, with ZERO network egress.
+#
+# EVERYTHING IS OFF BY DEFAULT. There is NO outbound webhook / HTTP — by design
+# (the dangerous egress surface is excluded). Only two ZERO-EGRESS backends
+# exist, both also off by default:
+#   local-exec — run a FIXED local command (e.g. `claude -p`), with the event
+#                summary appended as a SINGLE argument (no shell, no
+#                interpolation).
+#   outbox     — append one JSON line per event to a local file a small agent
+#                tails.
+#
+# This section is read from THIS config ONLY — no bridge write can enable it.
+#
+# Pipeline: filter (severity_floor + kinds + push_cleared) → coalesce
+#           (cool_down_seconds) → rate-limit (rate_limit_per_hour) → dispatch.
+# Every outcome is written to push-audit-YYYY-MM-DD.jsonl.
+[push]
+# Master switch. false ⇒ nothing subscribes, nothing dispatches.
+enabled = false
+# Minimum severity that pushes: "info" | "warn" | "critical". Default
+# "critical" — STRICTER than the banner floor, because a push wakes an agent.
+severity_floor = "critical"
+# Which event CLASSES push: "alert" (watchdog transitions), "verdict"
+# (aggregate verdict-level changes), "finding" (per-diagnosis diffs — chatty,
+# off by default). Native string array.
+kinds = ["alert", "verdict"]
+# Whether a resolved / *.cleared event (a condition ENDING) also pushes.
+push_cleared = false
+# Per-subject coalescing window (seconds): a repeat push for the same subject
+# inside this window is suppressed.
+cool_down_seconds = 60
+# Global cap on dispatched pushes per rolling hour. Over-cap ⇒ dropped + audited
+# (never queued).
+rate_limit_per_hour = 30
+# Consecutive backend failures that AUTO-DISABLE push (then re-enable manually).
+circuit_breaker_threshold = 5
+
+# local-exec backend — run a FIXED command; the event summary is APPENDED as the
+# final argument (one token, never a shell string).
+exec_enabled = false
+# The fixed command argv. Empty ⇒ inert. Example: ["claude", "-p"] runs
+# `claude -p "<summary>"`. Native string array.
+exec_argv = []
+
+# outbox backend — append-only JSONL a local agent tails.
+outbox_enabled = false
+# Directory for the push-outbox-YYYY-MM-DD.jsonl files. Empty ⇒ a default under
+# Application Support/uZora.
+outbox_path = ""

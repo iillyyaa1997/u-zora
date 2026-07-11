@@ -137,6 +137,13 @@ printf 'APPLuZor' > "$APP_BUNDLE/Contents/PkgInfo"
 if [ -d "$RES_BUNDLE" ]; then
   cp -R "$RES_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
 fi
+# Ship the Claude-Code channel shim (phase B4) inside the bundle so the stdio
+# MCP push-path travels with uZora.app. Purely additive — the shim also runs
+# from its repo/dist path — so a missing build simply skips this step.
+if [ -d "$REPO_ROOT/channel/dist" ]; then
+  mkdir -p "$APP_BUNDLE/Contents/Resources/channel/dist"
+  cp -R "$REPO_ROOT/channel/dist/." "$APP_BUNDLE/Contents/Resources/channel/dist/"
+fi
 codesign --sign - --deep --force "$APP_BUNDLE" >/dev/null 2>&1 || true
 [ -x "$APP_BUNDLE/Contents/MacOS/uZora" ] && pass "bundle assembled" || fail "bundle assembled"
 

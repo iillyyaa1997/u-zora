@@ -1,0 +1,25 @@
+{
+  "name": "uzora-channel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude-Code channel-shim for uZora: subscribes to GET /stream and re-emits each event as a notifications/claude/channel notification over stdio MCP.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "uzora-channel": "dist/uzora-channel.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild uzora-channel.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/uzora-channel.js --banner:js=\"#!/usr/bin/env node\nimport{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\" && node -e \"require('fs').writeFileSync('dist/package.json', JSON.stringify({type:'module'})+'\\n')\"",
+    "smoke": "npm run build && node smoke-test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "eventsource": "^3.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.4.0"
+  }
+}

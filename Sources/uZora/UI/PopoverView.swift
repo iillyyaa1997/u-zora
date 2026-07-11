@@ -87,7 +87,8 @@ struct PopoverView<Source: PopoverDataSource>: View {
             PopoverFooter(
                 httpAlive: state.httpAlive,
                 mcpAlive: state.mcpAlive,
-                jsonlAlive: state.jsonlAlive
+                jsonlAlive: state.jsonlAlive,
+                llmConnected: state.llmClientsConnected
             )
         }
         .frame(width: 400, height: 500)
@@ -197,6 +198,9 @@ private struct PopoverFooter: View {
     let httpAlive: Bool
     let mcpAlive: Bool
     let jsonlAlive: Bool
+    /// B5: connected-LLM-client count for the "LLM" pill. The pill's 3 states
+    /// derive from (`mcpAlive`, this) via `llmPillState`.
+    let llmConnected: Int
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -205,6 +209,7 @@ private struct PopoverFooter: View {
                 ChannelDot(label: "HTTP", on: httpAlive)
                 ChannelDot(label: "MCP", on: mcpAlive)
                 ChannelDot(label: "JSONL", on: jsonlAlive)
+                LLMPill(state: llmPillState(mcpAlive: mcpAlive, clients: llmConnected))
                 Spacer()
             }
             HStack {
@@ -1019,6 +1024,58 @@ private struct ChannelDot: View {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - B5 footer "LLM" pill
+
+/// The 3 display states of the footer "LLM" pill (plan D-L7):
+/// - `off`         — the MCP bridge is disabled (`!mcpAlive`): gray dot, "LLM".
+/// - `configured`  — bridge up, no clients connected: blue dot, "LLM".
+/// - `connected(N)`— bridge up, N>0 clients: green dot, "LLM N".
+enum LLMPillState: Equatable {
+    case off
+    case configured
+    case connected(Int)
+}
+
+/// Pure selector for the pill state — off when the bridge is down, configured
+/// when up with zero clients, connected(N) when N>0. Tested in isolation.
+func llmPillState(mcpAlive: Bool, clients: Int) -> LLMPillState {
+    if !mcpAlive { return .off }
+    if clients <= 0 { return .configured }
+    return .connected(clients)
+}
+
+/// Small 3-state pill cloned from `ChannelDot` (a colored dot + label).
+private struct LLMPill: View {
+    let state: LLMPillState
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 8, height: 8)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var dotColor: Color {
+        switch state {
+        case .off:          return .gray
+        case .configured:   return .blue
+        case .connected:    return .green
+        }
+    }
+
+    private var label: String {
+        switch state {
+        case .off:                  return "LLM"
+        case .configured:           return "LLM"
+        case .connected(let n):     return "LLM \(n)"
         }
     }
 }

@@ -89,6 +89,11 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     @Published var mcpAlive: Bool = true
     @Published var jsonlAlive: Bool = true
 
+    // B5: synthetic connected-LLM-client count for the footer "LLM" pill.
+    // Cycled 0 → 1 → 2 with the tick (paired with `mcpAlive`) so the pill
+    // visibly steps through off / configured / connected(N) in demo mode.
+    @Published var llmClientsConnected: Int = 0
+
     // MARK: - Motion driver state
 
     /// Monotonic step counter — drives the sine phase, list rotation, dots.
@@ -402,6 +407,9 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
         httpAlive = true
         mcpAlive = (tick % 2 == 0)
         jsonlAlive = (tick % 3 != 0)
+        // 0, 1, 2 cycling — with mcpAlive above this walks the pill through
+        // off (mcp down) / configured (mcp up, 0) / connected(N) states.
+        llmClientsConnected = tick % 3
     }
 
     // MARK: - Recent actions

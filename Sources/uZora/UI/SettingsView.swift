@@ -10,10 +10,19 @@ import ServiceManagement
 public struct SettingsView: View {
     @ObservedObject var bindings: ConfigBindings
     @ObservedObject var state: UIState
+    /// B5: roll the bridge bearer (the "MCP & API" tab's "Regenerate" button).
+    /// Defaulted to a no-op so previews/tests build without an AppDelegate;
+    /// production wires `AppDelegate.regenerateBridgeToken()`.
+    let onRegenerateToken: () -> Void
 
-    public init(bindings: ConfigBindings, state: UIState) {
+    public init(
+        bindings: ConfigBindings,
+        state: UIState,
+        onRegenerateToken: @escaping () -> Void = {}
+    ) {
         self.bindings = bindings
         self.state = state
+        self.onRegenerateToken = onRegenerateToken
     }
 
     public var body: some View {
@@ -38,7 +47,7 @@ public struct SettingsView: View {
                 .tabItem {
                     Label(String(localized: "Actions", defaultValue: "Actions"), systemImage: "bolt.badge.automatic")
                 }
-            APITab(bindings: bindings, state: state)
+            APITab(bindings: bindings, state: state, onRegenerateToken: onRegenerateToken)
                 .tabItem {
                     Label(String(localized: "MCP & API", defaultValue: "MCP & API"), systemImage: "network")
                 }
@@ -569,6 +578,7 @@ private struct AuditRow: View {
 private struct APITab: View {
     @ObservedObject var bindings: ConfigBindings
     @ObservedObject var state: UIState
+    let onRegenerateToken: () -> Void
 
     var body: some View {
         Form {
@@ -600,12 +610,76 @@ private struct APITab: View {
                     label: String(localized: "MCP URL", defaultValue: "MCP URL"),
                     value: mcpURL
                 )
+                // B5: reveal/copy the write-tier bearer + roll it. Masked by
+                // default (SecureField); the token is never logged.
+                RevealCopyField(
+                    label: String(localized: "Bearer token", defaultValue: "Bearer token"),
+                    value: state.bridgeToken
+                )
+                HStack {
+                    Button(String(localized: "Regenerate", defaultValue: "Regenerate")) {
+                        onRegenerateToken()
+                    }
+                    Spacer()
+                }
+                Text(String(
+                    localized: "Writes (ack alert / set probe config / run action) require this token as Authorization: Bearer.",
+                    defaultValue: "Writes (ack alert / set probe config / run action) require this token as Authorization: Bearer."
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if state.bridgeTokenNeedsRestart {
+                    Text(String(
+                        localized: "Token rolled — restart uZora to apply it to the running server.",
+                        defaultValue: "Token rolled — restart uZora to apply it to the running server."
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                // B5: live "N clients connected" badge (read-only).
+                Text(bridgeClientsBadgeText(
+                    clients: state.bridgeClientsConnected,
+                    lastMCPRequest: state.lastMCPRequestAt
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section(header: Text(String(localized: "Sample client configs", defaultValue: "Sample client configs"))) {
                 CodeSnippetCopyView(
                     title: String(localized: "Claude Code / Cursor (HTTP MCP)", defaultValue: "Claude Code / Cursor (HTTP MCP)"),
                     snippet: claudeCodeSnippet
                 )
+            }
+            // B5: proactive push via the Claude-Code channel-shim (stdio). This
+            // is the STDIO shim form — distinct from the HTTP-MCP snippet above.
+            Section(header: Text(String(localized: "Proactive push (Claude Code)", defaultValue: "Proactive push (Claude Code)"))) {
+                if let scriptPath = bundledChannelScriptPath() {
+                    CodeSnippetCopyView(
+                        title: String(localized: ".mcp.json (channel shim, stdio)", defaultValue: ".mcp.json (channel shim, stdio)"),
+                        snippet: uzoraChannelStdioSnippet(
+                            scriptPath: scriptPath,
+                            streamURL: streamURL,
+                            token: state.bridgeToken.isEmpty ? nil : state.bridgeToken
+                        )
+                    )
+                    LabeledCopyField(
+                        label: String(localized: "Launch", defaultValue: "Launch"),
+                        value: channelLaunchLine
+                    )
+                    Text(String(
+                        localized: "Claude Code v2.1.80+. The dev-channels flag is required during the preview; approve the server once.",
+                        defaultValue: "Claude Code v2.1.80+. The dev-channels flag is required during the preview; approve the server once."
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(String(
+                        localized: "Channel shim not bundled in this build. Build the channel (channel/dist/uzora-channel.js) or run the packaged app to enable proactive push.",
+                        defaultValue: "Channel shim not bundled in this build. Build the channel (channel/dist/uzora-channel.js) or run the packaged app to enable proactive push."
+                    ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -614,6 +688,15 @@ private struct APITab: View {
 
     private var mcpURL: String {
         "http://127.0.0.1:\(bindings.current.http.port)/mcp"
+    }
+
+    /// SSE endpoint the channel shim subscribes to.
+    private var streamURL: String {
+        "http://127.0.0.1:\(bindings.current.http.port)/stream"
+    }
+
+    private var channelLaunchLine: String {
+        "claude --dangerously-load-development-channels server:uzora"
     }
 
     private var claudeCodeSnippet: String {
@@ -630,6 +713,70 @@ private struct APITab: View {
     }
 }
 
+// MARK: - B5 helpers (pure, testable)
+
+/// Absolute path of the bundled Claude-Code channel shim
+/// (`<Resources>/channel/dist/uzora-channel.js`), or `nil` when it isn't
+/// present (a plain `swift build` / test bundle has no app resources). The
+/// Settings tab renders a "shim not bundled" note instead of a broken path.
+/// Uses `Bundle.main` (the app bundle), NOT `Bundle.module`.
+func bundledChannelScriptPath() -> String? {
+    guard let resources = Bundle.main.resourcePath else { return nil }
+    let path = resources + "/channel/dist/uzora-channel.js"
+    return FileManager.default.fileExists(atPath: path) ? path : nil
+}
+
+/// Build the STDIO channel-shim `.mcp.json` snippet at runtime from the bundled
+/// script path + the live `/stream` URL, optionally injecting `UZORA_TOKEN`.
+/// This is the `command:"node"` stdio form (distinct from the HTTP-MCP snippet).
+/// Assembled line-by-line (no multi-term literal chains) for the cross-SDK
+/// type-checker guard, and deterministic for tests.
+func uzoraChannelStdioSnippet(scriptPath: String, streamURL: String, token: String?) -> String {
+    var lines: [String] = []
+    lines.append("{")
+    lines.append("  \"mcpServers\": {")
+    lines.append("    \"uzora\": {")
+    lines.append("      \"command\": \"node\",")
+    lines.append("      \"args\": [\"\(scriptPath)\"],")
+    lines.append("      \"env\": {")
+    lines.append("        \"UZORA_STREAM_URL\": \"\(streamURL)\",")
+    if let token, !token.isEmpty {
+        lines.append("        \"UZORA_MIN_SEVERITY\": \"warn\",")
+        lines.append("        \"UZORA_TOKEN\": \"\(token)\"")
+    } else {
+        lines.append("        \"UZORA_MIN_SEVERITY\": \"warn\"")
+    }
+    lines.append("      }")
+    lines.append("    }")
+    lines.append("  }")
+    lines.append("}")
+    return lines.joined(separator: "\n")
+}
+
+/// The live "N clients connected" badge string. "no clients connected" when
+/// zero; otherwise "🟢 N client(s) connected" with an optional "· last MCP
+/// request Ns ago" suffix. Kept pure (inject `now`) for tests.
+func bridgeClientsBadgeText(clients: Int, lastMCPRequest: Date?, now: Date = Date()) -> String {
+    if clients <= 0 { return String(localized: "no clients connected", defaultValue: "no clients connected") }
+    let noun = clients == 1 ? "client" : "clients"
+    var s = "🟢 \(clients) \(noun) connected"
+    if let last = lastMCPRequest {
+        s += " · last MCP request \(relativeAgoLabel(from: last, now: now))"
+    }
+    return s
+}
+
+/// Compact relative-age label ("just now" / "12s ago" / "5m ago" / "2h ago").
+func relativeAgoLabel(from: Date, now: Date = Date()) -> String {
+    let secs = Int(now.timeIntervalSince(from))
+    if secs < 1 { return "just now" }
+    if secs < 60 { return "\(secs)s ago" }
+    let mins = secs / 60
+    if mins < 60 { return "\(mins)m ago" }
+    let hours = mins / 60
+    return "\(hours)h ago"
+}
+
 private struct LabeledCopyField: View {
     let label: String
     let value: String
@@ -640,6 +787,42 @@ private struct LabeledCopyField: View {
             TextField("", text: .constant(value))
                 .textFieldStyle(.roundedBorder)
                 .disabled(true)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+}
+
+/// B5: a `LabeledCopyField` variant that masks its value (a secret bearer)
+/// behind a `SecureField` until the eye toggle reveals it. Copy always works.
+private struct RevealCopyField: View {
+    let label: String
+    let value: String
+    @State private var revealed = false
+
+    var body: some View {
+        HStack {
+            Text(label)
+            if revealed {
+                TextField("", text: .constant(value))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+            } else {
+                SecureField("", text: .constant(value))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+            }
+            Button {
+                revealed.toggle()
+            } label: {
+                Image(systemName: revealed ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
             Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(value, forType: .string)

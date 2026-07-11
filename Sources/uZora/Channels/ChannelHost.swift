@@ -29,6 +29,12 @@ public actor ChannelHost {
     public let rest: RESTHandlers
     public let sse: SSEStream
     public let mcp: MCPServer
+    /// B5 (plan D-L7): read-only live-connection metrics, exposed via
+    /// `streamClientsConnected()` / `lastMCPRequestAt()` (the `boundPort()`
+    /// pattern). Injected into `SSEStream` / `MCPServer`; `nil` when the app
+    /// doesn't wire them (existing tests). Never on the request hot path.
+    private let streamCounter: StreamClientCounter?
+    private let mcpClock: LastRequestClock?
 
     private weak var eventBus: EventBus?
     private var jsonlSubscriberToken: UUID?
@@ -50,7 +56,9 @@ public actor ChannelHost {
         bridgeAuth: BridgeAuth? = nil,
         executeEnabled: Bool = false,
         capabilityToken: String = "",
-        approvalRequester: (@Sendable (_ actionID: String, _ actionName: String) async -> Void)? = nil
+        approvalRequester: (@Sendable (_ actionID: String, _ actionName: String) async -> Void)? = nil,
+        streamClientCounter: StreamClientCounter? = nil,
+        lastMCPRequestClock: LastRequestClock? = nil
     ) {
         self.port = port
         self.state = state
@@ -59,6 +67,8 @@ public actor ChannelHost {
         self.actionRunner = actionRunner
         self.diagnosisStore = diagnosisStore
         self.diagnosisBus = diagnosisBus
+        self.streamCounter = streamClientCounter
+        self.mcpClock = lastMCPRequestClock
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
@@ -82,11 +92,18 @@ public actor ChannelHost {
             approvalRequester: approvalRequester
         )
         self.rest = rest
-        self.sse = SSEStream(eventBus: eventBus, diagnosisBus: diagnosisBus)
-        self.mcp = MCPServer(tools: MCPTools(
-            rest: rest,
-            httpBaseURL: "http://127.0.0.1:\(port)"
-        ))
+        self.sse = SSEStream(
+            eventBus: eventBus,
+            diagnosisBus: diagnosisBus,
+            clientCounter: streamClientCounter
+        )
+        self.mcp = MCPServer(
+            tools: MCPTools(
+                rest: rest,
+                httpBaseURL: "http://127.0.0.1:\(port)"
+            ),
+            lastRequestClock: lastMCPRequestClock
+        )
     }
 
     /// Subscribe the JSONL sink + StateStore to the EventBus and start
@@ -130,6 +147,18 @@ public actor ChannelHost {
 
     public func boundPort() async -> UInt16 {
         await httpServer.boundPort
+    }
+
+    /// B5 (plan D-L7): current count of open `/stream` clients (0 when no
+    /// counter was wired). Read on the 5s UI tick → `UIState.bridgeClientsConnected`.
+    public func streamClientsConnected() async -> Int {
+        await streamCounter?.value() ?? 0
+    }
+
+    /// B5: timestamp of the most recent `/mcp` request (nil until one lands, or
+    /// when no clock was wired). Read on the 5s UI tick → `UIState.lastMCPRequestAt`.
+    public func lastMCPRequestAt() async -> Date? {
+        await mcpClock?.value()
     }
 
     private func installRoutes() async throws {

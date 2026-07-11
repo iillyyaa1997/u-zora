@@ -25,6 +25,11 @@ public struct SSEStream: Sendable {
     /// bus simply means the diagnosis events are never emitted here.
     public let diagnosisBus: DiagnosisEventBus?
     public let heartbeat: Duration
+    /// B5 (plan D-L7): read-only live-client counter. `enter()` at the top of
+    /// `handle`, `leave()` in the disconnect `defer` — a diagnostics-only badge
+    /// ("N clients connected"), never on the delivery hot path. Optional +
+    /// defaulted `nil` so existing callers/tests compile unchanged.
+    public let clientCounter: StreamClientCounter?
 
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "sse")
@@ -32,11 +37,13 @@ public struct SSEStream: Sendable {
     public init(
         eventBus: EventBus,
         diagnosisBus: DiagnosisEventBus? = nil,
-        heartbeat: Duration = .seconds(30)
+        heartbeat: Duration = .seconds(30),
+        clientCounter: StreamClientCounter? = nil
     ) {
         self.eventBus = eventBus
         self.diagnosisBus = diagnosisBus
         self.heartbeat = heartbeat
+        self.clientCounter = clientCounter
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -48,6 +55,12 @@ public struct SSEStream: Sendable {
     /// Handler entry point. Stays alive until the client disconnects
     /// (the streaming sink's connection goes to `.failed` / `.cancelled`).
     public func handle(request: HTTPRequest, sink: StreamingResponseSink) async {
+        // B5: count this live client for the "N clients connected" badge. Enter
+        // once here, leave once when the connection tears down (the `defer`
+        // below), mirroring the subscribe/unsubscribe bracket. Diagnostics-only.
+        await clientCounter?.enter()
+        defer { if let clientCounter { Task { await clientCounter.leave() } } }
+
         // Both bus subscribers push onto ONE AsyncStream carrying a small
         // discriminated union, so the `handle` task multiplexes the two
         // parallel fan-outs (WatchdogEvent + DiagnosisStreamEvent) together

@@ -87,6 +87,11 @@ protocol PopoverDataSource: ObservableObject {
     var mcpAlive: Bool { get }
     var jsonlAlive: Bool { get }
 
+    // B5 (plan D-L7): number of connected LLM clients, driving the footer "LLM"
+    // pill. Satisfied on `UIState` by `bridgeClientsConnected` (the live
+    // `/stream` client count); `DemoDataSource` animates a synthetic value.
+    var llmClientsConnected: Int { get }
+
     // Shared computed surface. Declared as requirements so a concrete source
     // MAY override them (UIState keeps its own identical impls, unchanged),
     // but the default implementations below are the single shared mapping the

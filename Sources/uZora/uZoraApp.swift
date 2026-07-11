@@ -104,7 +104,13 @@ private struct SettingsGate: View {
     @ObservedObject var appDelegate: AppDelegate
     var body: some View {
         if let bindings = appDelegate.bindings {
-            SettingsView(bindings: bindings, state: appDelegate.uiState)
+            SettingsView(
+                bindings: bindings,
+                state: appDelegate.uiState,
+                // B5: the ONLY site that wires the REAL "Regenerate token" action
+                // (tests/previews keep the no-op default).
+                onRegenerateToken: { appDelegate.regenerateBridgeToken() }
+            )
                 .environment(\.locale, resolveLocale(from: bindings.current.general.language))
         } else {
             ProgressView()
@@ -235,6 +241,22 @@ public final class UIState: ObservableObject {
     @Published public var httpAlive: Bool = false
     @Published public var mcpAlive: Bool = false
     @Published public var jsonlAlive: Bool = false
+
+    // B5 (plan D-L7): live bridge-connection metrics + bearer token surfaced in
+    // the "MCP & API" Settings tab and the popover footer "LLM" pill. All are
+    // written on the existing 5s AppDelegate tick / at bootstrap — read-only in
+    // the UI. `bridgeToken` mirrors the 0600-sidecar bearer for reveal/copy
+    // (never logged); `bridgeTokenNeedsRestart` flips true after a Settings
+    // "Regenerate" (the sidecar rolled but the running server keeps the old
+    // token until relaunch — a clean live re-wire is not cheap).
+    @Published public var bridgeClientsConnected: Int = 0
+    @Published public var lastMCPRequestAt: Date? = nil
+    @Published public var bridgeToken: String = ""
+    @Published public var bridgeTokenNeedsRestart: Bool = false
+
+    /// Footer "LLM" pill count — the number of connected LLM clients, sourced
+    /// from the live `/stream` client count. Satisfies `PopoverDataSource`.
+    public var llmClientsConnected: Int { bridgeClientsConnected }
 
     /// Q10: recent action audit entries for the popover "Recent actions"
     /// section. Newest last; mirror of the AuditLog in-memory tail.
@@ -385,6 +407,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var proactivePush: ProactivePush?
     private var pushAuditLog: PushAuditLog?
     private var pushOutbox: PushOutbox?
+    // B5 (plan D-L7): the boot bridge bearer (kept so Settings can reveal/copy +
+    // regenerate) and the read-only live-connection metrics injected into the
+    // ChannelHost. Published mirrors live on `uiState`.
+    private var bridgeAuth: BridgeAuth?
+    private var streamCounter: StreamClientCounter?
+    private var mcpClock: LastRequestClock?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -718,6 +746,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // into the ChannelHost below. `loadOrCreate` never throws — a persist
         // failure still yields an in-memory token (writes fail closed).
         let bridgeAuth = BridgeAuth.loadOrCreate()
+        // B5: keep the boot bearer so the "MCP & API" tab can reveal/copy it and
+        // roll it (regenerate). Mirror into `uiState.bridgeToken` for display —
+        // NEVER logged; the write path only ever `validate()`s it.
+        self.bridgeAuth = bridgeAuth
+        uiState.bridgeToken = bridgeAuth.token
+
+        // B5: read-only live-connection metrics for the Settings badge + footer
+        // "LLM" pill. Constructed here, injected into the ChannelHost below, and
+        // polled on the 5s refresh tick. Diagnostics-only — never gate a request.
+        let streamCounter = StreamClientCounter()
+        let mcpClock = LastRequestClock()
+        self.streamCounter = streamCounter
+        self.mcpClock = mcpClock
 
         // B2 Execute tier: the human-tap approval poster handed to the bridge.
         // When an LLM-requested real run needs confirmation, `RESTHandlers` calls
@@ -760,7 +801,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // token (both from [mcp] config), plus the human-tap approval poster.
                 executeEnabled: initial.mcp.executeEnabled,
                 capabilityToken: initial.mcp.capabilityToken,
-                approvalRequester: approvalRequester
+                approvalRequester: approvalRequester,
+                // B5: read-only live-connection metrics (stream client count +
+                // last MCP request), surfaced in Settings + the footer pill.
+                streamClientCounter: streamCounter,
+                lastMCPRequestClock: mcpClock
             )
             do {
                 try await host.start()
@@ -1222,6 +1267,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             uiState.recentActions = recent
         }
 
+        // B5 (plan D-L7): publish the read-only live-connection metrics off the
+        // ChannelHost accessors (same cadence as the audit mirror above) — the
+        // Settings "N clients connected" badge + the footer "LLM" pill read
+        // these. A `nil` host (HTTP disabled) leaves the defaults (0 / nil).
+        if let host = self.host {
+            uiState.bridgeClientsConnected = await host.streamClientsConnected()
+            uiState.lastMCPRequestAt = await host.lastMCPRequestAt()
+        }
+
         // A4c: keep the popover's per-probe runnable-action map current with
         // the active alert set (periodic — the immediate paths are the alert
         // subscription + an ack), so a finding card can decide the "Fix" button
@@ -1285,6 +1339,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let active = await store.activeAlerts()
         uiState.apply(activeAlerts: active)
         await recomputeAvailableActions()
+    }
+
+    /// B5 (plan D-L7) "Regenerate" from the "MCP & API" tab. Mints a NEW bearer
+    /// via `BridgeAuth.regenerate()` (which rolls the 0600 sidecar), keeps it as
+    /// the boot auth, and mirrors it into `uiState.bridgeToken` so the reveal /
+    /// copy field + the channel-shim snippet update immediately.
+    ///
+    /// The RUNNING server keeps the OLD token: `RESTHandlers` captures the
+    /// `BridgeAuth` by value inside the already-started `ChannelHost` (its route
+    /// closures hold that value), so a clean live re-wire would mean re-registering
+    /// every write route — not cheap, and easy to get subtly wrong for a security
+    /// gate. We therefore roll the sidecar + refresh the display and flag
+    /// `bridgeTokenNeedsRestart` so the tab shows a "restart uZora to apply to the
+    /// running server" note. B1b is untouched (the token stays a 0600 sidecar).
+    @MainActor
+    fileprivate func regenerateBridgeToken() {
+        let auth = BridgeAuth.regenerate()
+        self.bridgeAuth = auth
+        uiState.bridgeToken = auth.token
+        uiState.bridgeTokenNeedsRestart = true
     }
 
     /// Previous ProcessSampler snapshot — kept on the actor for per-PID

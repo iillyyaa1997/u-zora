@@ -20,10 +20,16 @@ import os
 public struct MCPServer: Sendable {
 
     public let tools: MCPTools
+    /// B5 (plan D-L7): read-only "last MCP request" clock. Stamped once at the
+    /// top of `handle` (any verb — the JSON-RPC POST or the GET-405 probe), read
+    /// on the 5s UI tick to render "last MCP request Ns ago". Optional +
+    /// defaulted `nil` so existing callers/tests compile unchanged; never gates.
+    public let lastRequestClock: LastRequestClock?
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "mcp")
 
-    public init(tools: MCPTools) {
+    public init(tools: MCPTools, lastRequestClock: LastRequestClock? = nil) {
         self.tools = tools
+        self.lastRequestClock = lastRequestClock
     }
 
     /// Server identity reported through `initialize`.
@@ -45,6 +51,10 @@ public struct MCPServer: Sendable {
     ///   happy. Origin validation is intentionally NOT done here (that is the
     ///   B1b auth phase).
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        // B5: stamp the "last MCP request" clock (diagnostics-only badge). Any
+        // verb counts — a real POST or the GET-405 probe both prove a client is
+        // talking to `/mcp`. Single non-blocking actor await before dispatch.
+        await lastRequestClock?.stamp()
         // Request headers are lowercased by `HTTPRequest.parse`.
         let sessionID = request.headers["mcp-session-id"]
         // B1b: lift the write-tier auth material (Authorization / Origin / Host)

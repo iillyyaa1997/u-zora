@@ -26,7 +26,14 @@ public struct MCPTools: Sendable {
 
     // MARK: - Tool dispatch
 
-    public func invoke(name: String, arguments: JSONValue) async throws -> JSONValue {
+    /// Invoke a tool. `auth` carries the write-tier auth material
+    /// (Authorization / Origin / Host) lifted from the originating HTTP request
+    /// by `MCPServer.handle`; it is threaded into the two WRITE tools so their
+    /// REST handlers can enforce the B1b bearer + loopback gate. Read tools
+    /// ignore it (reads are never gated). Defaulted to an empty context so the
+    /// existing in-process test call sites (which invoke MCPTools directly, with
+    /// no wired `BridgeAuth`) compile + stay unauthenticated.
+    public func invoke(name: String, arguments: JSONValue, auth: WriteAuthContext = WriteAuthContext()) async throws -> JSONValue {
         switch name {
         case "uzora_status":
             let resp = await rest.status()
@@ -109,21 +116,23 @@ public struct MCPTools: Sendable {
 
         case "uzora_ack_alert":
             // Write: acknowledge a firing alert. Single-sourced through the
-            // same REST handler `POST /alerts/ack` uses; the handler itself
-            // enforces the `allow_writes` gate (403 → isError) and 404 for an
-            // unknown id.
+            // same REST handler `POST /alerts/ack` uses; the handler enforces
+            // the `allow_writes` gate (403 → isError), the B1b bearer + loopback
+            // gate (401/403 → isError, using the threaded `auth`), and 404 for
+            // an unknown id.
             var id: String? = nil
             if case .object(let args) = arguments,
                case .string(let s)? = args["id"] {
                 id = s
             }
-            let resp = await rest.acknowledgeAlert(id: id)
+            let resp = await rest.acknowledgeAlert(id: id, auth: auth)
             return MCPTools.wrap(resp)
 
         case "uzora_set_probe_config":
             // Write: reconfigure one probe and persist to config.toml (the
             // existing hot-reload observer then applies it). Same handler as
             // `POST /config/probe`; the handler enforces `allow_writes` (403),
+            // the B1b bearer + loopback gate (401/403, via `auth`),
             // unknown-probe (400), and the fan/battery/smart/thermal
             // threshold-drop `warnings`.
             var probe: String? = nil
@@ -139,7 +148,7 @@ public struct MCPTools: Sendable {
                 // out-of-range input rather than crashing the daemon.
                 patch.pollIntervalSecRaw = MCPTools.number(args["poll_interval_sec"])
             }
-            let resp = await rest.reconfigureProbe(name: probe, patch: patch)
+            let resp = await rest.reconfigureProbe(name: probe, patch: patch, auth: auth)
             return MCPTools.wrap(resp)
 
         case "uzora_subscribe":
@@ -344,10 +353,15 @@ public struct MCPTools: Sendable {
         let gate = allowWrites
             ? ""
             : " NOTE: writes are currently DISABLED (set [mcp] allow_writes = true in config.toml); calling this returns an error."
+        // B1b: every write now additionally requires the bridge bearer token,
+        // presented on the HTTP request as `Authorization: Bearer <token>` (the
+        // token lives in ~/Library/Application Support/uZora/bridge-token; B5
+        // surfaces it in Settings). Reads stay unauthenticated on loopback.
+        let bearer = " Requires the bridge bearer token (HTTP header `Authorization: Bearer <token>`); a missing/invalid token returns a 401 error."
         return [
             [
                 "name": .string("uzora_ack_alert"),
-                "description": .string("Acknowledge (dismiss) a currently-firing alert by id. UI-state only — does NOT touch the OS, only hides the alert from the active set until it escalates or clears. Get ids from uzora_list_alerts (the `id` field, e.g. 'disk:/')." + gate),
+                "description": .string("Acknowledge (dismiss) a currently-firing alert by id. UI-state only — does NOT touch the OS, only hides the alert from the active set until it escalates or clears. Get ids from uzora_list_alerts (the `id` field, e.g. 'disk:/')." + bearer + gate),
                 "inputSchema": .object([
                     "type": .string("object"),
                     "properties": .object([
@@ -361,7 +375,7 @@ public struct MCPTools: Sendable {
             ],
             [
                 "name": .string("uzora_set_probe_config"),
-                "description": .string("Change one probe's configuration (enabled / thresholds / poll interval), persisted to config.toml and hot-reloaded. Threshold units: disk=percent-free, cpu_temp/kernel_task/top_cpu=direct (°C or CPU%), top_mem=GiB, top_net=MiB/s. fan/battery/smart/thermal IGNORE thresholds (enabled + poll only) — a threshold sent to those is not persisted and a warning is returned." + gate),
+                "description": .string("Change one probe's configuration (enabled / thresholds / poll interval), persisted to config.toml and hot-reloaded. Threshold units: disk=percent-free, cpu_temp/kernel_task/top_cpu=direct (°C or CPU%), top_mem=GiB, top_net=MiB/s. fan/battery/smart/thermal IGNORE thresholds (enabled + poll only) — a threshold sent to those is not persisted and a warning is returned." + bearer + gate),
                 "inputSchema": .object([
                     "type": .string("object"),
                     "properties": .object([

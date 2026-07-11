@@ -696,6 +696,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             }
         }
 
+        // B1b: load (or first-launch-generate) the bridge bearer token from its
+        // 0600 sidecar file, SEPARATE from the world-readable config.toml. Every
+        // write (ack / set_probe_config, REST + MCP) now requires this token as
+        // `Authorization: Bearer <token>`; reads stay open on loopback. Wired
+        // into the ChannelHost below. `loadOrCreate` never throws — a persist
+        // failure still yields an in-memory token (writes fail closed).
+        let bridgeAuth = BridgeAuth.loadOrCreate()
+
         // Bring up the four-channel bridge respecting HTTP/MCP enablement.
         let portConfig = initial.http.port
         let portEnv = ProcessInfo.processInfo.environment["UZORA_HTTP_PORT"].flatMap { UInt16($0) }
@@ -720,7 +728,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // above); the diagnosis loop feeds it each cycle.
                 diagnosisStore: diagnosisStore,
                 // B1a (plan D-L4): parallel diagnosis fan-out onto /stream.
-                diagnosisBus: diagnosisBus
+                diagnosisBus: diagnosisBus,
+                // B1b: bearer-token gate for the write tier.
+                bridgeAuth: bridgeAuth
             )
             do {
                 try await host.start()

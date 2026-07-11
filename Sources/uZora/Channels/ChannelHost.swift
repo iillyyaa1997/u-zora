@@ -46,7 +46,8 @@ public actor ChannelHost {
         allowWrites: Bool = true,
         actionRunner: ActionRunner? = nil,
         diagnosisStore: DiagnosisStore? = nil,
-        diagnosisBus: DiagnosisEventBus? = nil
+        diagnosisBus: DiagnosisEventBus? = nil,
+        bridgeAuth: BridgeAuth? = nil
     ) {
         self.port = port
         self.state = state
@@ -64,7 +65,12 @@ public actor ChannelHost {
             configLoader: configLoader,
             allowWrites: allowWrites,
             actionRunner: actionRunner,
-            diagnosisStore: diagnosisStore
+            diagnosisStore: diagnosisStore,
+            // B1b: gate the write tier with the bridge bearer token. The write
+            // REST routes call `rest.dispatch(req)` and the MCP routes call
+            // `mcp.handle(req)`, both of which already carry the request headers
+            // → the bearer + Origin/Host checks run on every write.
+            bridgeAuth: bridgeAuth
         )
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus, diagnosisBus: diagnosisBus)

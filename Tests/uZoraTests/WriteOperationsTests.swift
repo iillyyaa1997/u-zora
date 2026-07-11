@@ -465,9 +465,14 @@ struct WriteOperationsTests {
         let state = StateStore()
         let jsonl = try JSONLEventSink(baseDir: dir, retentionDays: 30)
         let loader = try ConfigLoader(configURL: cfgURL)
+        // B1b: wire the bridge bearer token (as production does) so the full
+        // HTTP write path is exercised WITH auth. URLSession sets the loopback
+        // `Host` automatically, so only the Authorization header is needed.
+        let token = "e2e-host-token"
         let host = ChannelHost(
             port: 0, state: state, jsonl: jsonl, eventBus: bus,
-            configLoader: loader, allowWrites: true
+            configLoader: loader, allowWrites: true,
+            bridgeAuth: BridgeAuth(token: token)
         )
         try await host.start()
         let port = await host.boundPort()
@@ -477,18 +482,28 @@ struct WriteOperationsTests {
         await bus.emit(.appeared(alert("disk", "/")))
         try await Task.sleep(for: .milliseconds(150))
 
-        // POST /alerts/ack over real HTTP.
+        // A write WITHOUT the bearer is rejected (401) and does NOT ack.
+        var noAuthReq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/alerts/ack")!)
+        noAuthReq.httpMethod = "POST"
+        noAuthReq.httpBody = Data(#"{"id":"disk:/"}"#.utf8)
+        let (_, noAuthResp) = try await URLSession.shared.data(for: noAuthReq)
+        #expect((noAuthResp as? HTTPURLResponse)?.statusCode == 401)
+        #expect(await state.activeAlerts().count == 1)
+
+        // POST /alerts/ack over real HTTP WITH the bearer.
         var ackReq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/alerts/ack")!)
         ackReq.httpMethod = "POST"
+        ackReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         ackReq.httpBody = Data(#"{"id":"disk:/"}"#.utf8)
         let (ackData, ackResp) = try await URLSession.shared.data(for: ackReq)
         #expect((ackResp as? HTTPURLResponse)?.statusCode == 200)
         let ackJSON = try? JSONSerialization.jsonObject(with: ackData) as? [String: Any]
         #expect(ackJSON?["acknowledged"] as? Bool == true)
 
-        // POST /config/probe over real HTTP.
+        // POST /config/probe over real HTTP WITH the bearer.
         var cfgReq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/config/probe")!)
         cfgReq.httpMethod = "POST"
+        cfgReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         cfgReq.httpBody = Data(#"{"probe":"disk","enabled":false}"#.utf8)
         let (cfgData, cfgResp) = try await URLSession.shared.data(for: cfgReq)
         #expect((cfgResp as? HTTPURLResponse)?.statusCode == 200)

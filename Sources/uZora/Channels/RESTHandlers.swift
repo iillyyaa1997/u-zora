@@ -35,6 +35,17 @@ public struct RESTHandlers: Sendable {
     /// an explanatory note — the same graceful-degradation pattern `metrics()`
     /// / `actions()` use when their store isn't wired (e.g. running headless).
     public let diagnosisStore: DiagnosisStore?
+    /// B1b write-tier auth. When wired, every write (`ack_alert` /
+    /// `set_probe_config`, REST + MCP) additionally requires a valid
+    /// `Authorization: Bearer <token>` on top of the `allowWrites` master
+    /// switch (missing/invalid ⇒ 401). Optional + defaulted `nil` so pure-unit
+    /// write harnesses that exercise write *semantics* (ack no-op, threshold
+    /// validation) build without wiring auth and stay unauthenticated; the
+    /// Origin/Host loopback check is enforced regardless (it no-ops for the
+    /// header-less / loopback calls those harnesses make). Production
+    /// (`ChannelHost` ← `uZoraApp`) ALWAYS wires a `BridgeAuth`, so real writes
+    /// are always gated.
+    public let bridgeAuth: BridgeAuth?
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "rest")
 
@@ -44,7 +55,8 @@ public struct RESTHandlers: Sendable {
         configLoader: ConfigLoader? = nil,
         allowWrites: Bool = true,
         actionRunner: ActionRunner? = nil,
-        diagnosisStore: DiagnosisStore? = nil
+        diagnosisStore: DiagnosisStore? = nil,
+        bridgeAuth: BridgeAuth? = nil
     ) {
         self.state = state
         self.metricsStore = metricsStore
@@ -52,6 +64,7 @@ public struct RESTHandlers: Sendable {
         self.allowWrites = allowWrites
         self.actionRunner = actionRunner
         self.diagnosisStore = diagnosisStore
+        self.bridgeAuth = bridgeAuth
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -270,15 +283,19 @@ public struct RESTHandlers: Sendable {
     /// rather than the URL path: alert ids embed `:` and `/` (e.g. `disk:/`),
     /// which the exact-match HTTP router cannot carry as a path segment.
     ///
-    /// - 403 when writes are globally disabled (`allow_writes = false`).
+    /// - 403 when writes are globally disabled (`allow_writes = false`), or the
+    ///   request's `Host`/`Origin` is non-loopback / cross-origin (B1b).
+    /// - 401 when the bearer token is missing/invalid (B1b — writes now require
+    ///   `Authorization: Bearer <token>`; reads are unaffected).
     /// - 400 when the body is missing / malformed / has no `id`.
     /// - 404 when no active alert carries that id.
     /// - 200 `{acknowledged:true, id:"..."}` on a fresh ack.
     /// - 200 `{acknowledged:false, id:"...", already:true}` on a no-op re-ack
     ///   of an already-acknowledged, still-firing alert (the alert IS acked,
     ///   so 200 not 404 — but `acknowledged:false` signals nothing changed).
-    public func acknowledgeAlert(id rawID: String?) async -> HTTPResponse {
+    public func acknowledgeAlert(id rawID: String?, auth: WriteAuthContext = WriteAuthContext()) async -> HTTPResponse {
         guard allowWrites else { return Self.writesDisabledResponse() }
+        if let denial = authorizeWrite(auth) { return denial }
         guard let id = rawID, !id.isEmpty else {
             return encode(ErrorBody(error: "ack requires a non-empty alert id (body: {\"id\":\"disk:/\"})"), status: 400)
         }
@@ -375,7 +392,9 @@ public struct RESTHandlers: Sendable {
     /// running registry — this handler only loads, mutates one keypath, and
     /// writes.
     ///
-    /// - 403 when writes are globally disabled.
+    /// - 403 when writes are globally disabled, or the request's `Host`/`Origin`
+    ///   is non-loopback / cross-origin (B1b).
+    /// - 401 when the bearer token is missing/invalid (B1b).
     /// - 400 when `probe` is missing or not one of the 10 known names.
     /// - 500 when no ConfigLoader is wired, or the write/load fails.
     /// - 200 `{updated:true, probe, config, warnings}` on success.
@@ -386,8 +405,9 @@ public struct RESTHandlers: Sendable {
     /// (fan, battery, smart, thermal) IGNORE thresholds — a threshold sent to
     /// one of them is **not persisted** and a `warnings` entry explains why
     /// (enabled / poll_interval_sec are still applied).
-    public func reconfigureProbe(name rawName: String?, patch: ProbeConfigPatch) async -> HTTPResponse {
+    public func reconfigureProbe(name rawName: String?, patch: ProbeConfigPatch, auth: WriteAuthContext = WriteAuthContext()) async -> HTTPResponse {
         guard allowWrites else { return Self.writesDisabledResponse() }
+        if let denial = authorizeWrite(auth) { return denial }
         guard let name = rawName, !name.isEmpty else {
             return encode(ErrorBody(error: "reconfigure requires a 'probe' name (one of: \(Self.knownProbeNames.joined(separator: ", ")))"), status: 400)
         }
@@ -759,16 +779,21 @@ public struct RESTHandlers: Sendable {
         case ("GET", "/verdict"):
             return await verdict()
         case ("POST", "/alerts/ack"):
+            // B1b: lift the write-auth material (Authorization/Origin/Host) from
+            // the request headers so the write handler can gate on the bearer +
+            // loopback checks.
+            let auth = WriteAuthContext(headers: request.headers)
             let id = Self.stringField("id", in: request.body)
-            return await acknowledgeAlert(id: id)
+            return await acknowledgeAlert(id: id, auth: auth)
         case ("POST", "/config/probe"):
+            let auth = WriteAuthContext(headers: request.headers)
             let body = (try? JSONValue.decode(request.body)) ?? .null
             guard case .object(let fields) = body else {
                 return encode(ErrorBody(error: "reconfigure requires a JSON object body"), status: 400)
             }
             let name = Self.stringValue(fields["probe"])
             let patch = Self.parsePatch(from: fields)
-            return await reconfigureProbe(name: name, patch: patch)
+            return await reconfigureProbe(name: name, patch: patch, auth: auth)
         default:
             return HTTPResponse.notFound("no REST route for \(request.method) \(request.path)")
         }
@@ -788,6 +813,128 @@ public struct RESTHandlers: Sendable {
     /// contexts and is byte-identical for REST + MCP.
     static func writesDisabledResponse() -> HTTPResponse {
         let body = Data(#"{"error":"writes disabled (set [mcp] allow_writes = true)"}"#.utf8)
+        return HTTPResponse(
+            status: 403,
+            statusText: "Forbidden",
+            headers: [("Content-Type", "application/json; charset=utf-8")],
+            body: body
+        )
+    }
+
+    // MARK: - B1b write-tier auth (bearer + Origin/Host)
+
+    /// Write-tier gate (Phase B1b). Returns a non-nil denial `HTTPResponse` when
+    /// the request must be rejected, or `nil` when the write may proceed. Two
+    /// independent checks, applied AFTER the `allowWrites` master switch:
+    ///
+    ///  1. **Origin/Host loopback** (`originHostAllowed`) — the DNS-rebinding
+    ///     cut. ALWAYS enforced; a header-less / loopback caller (curl / Claude
+    ///     Code / in-process) passes. A non-loopback `Host` or a cross-origin
+    ///     `Origin` ⇒ **403**.
+    ///  2. **Bearer token** — enforced ONLY when a `BridgeAuth` is wired
+    ///     (production always wires one). A missing / invalid
+    ///     `Authorization: Bearer <token>` ⇒ **401**.
+    ///
+    /// Origin/Host is checked before the bearer so a browser rebinding attempt
+    /// (cross-origin, no token) is cut at 403 regardless of the token; a
+    /// legitimate loopback client that merely forgot the token gets a 401.
+    func authorizeWrite(_ auth: WriteAuthContext) -> HTTPResponse? {
+        guard Self.originHostAllowed(host: auth.host, origin: auth.origin) else {
+            return Self.forbiddenOriginResponse()
+        }
+        if let checker = bridgeAuth {
+            guard checker.validate(auth.presentedBearer) else {
+                return Self.unauthorizedResponse()
+            }
+        }
+        return nil
+    }
+
+    /// Whether a write request's `Host` + `Origin` headers are acceptable
+    /// (loopback-only). Pure + testable — the DNS-rebinding cut for a mutation
+    /// issued from a browser tab.
+    ///
+    /// - `host`: the `Host` header. Absent/empty ⇒ allowed (non-HTTP /
+    ///   in-process callers). Present ⇒ must be a loopback host
+    ///   (`127.0.0.0/8` / `localhost` / `::1`), optional `:port`; else rejected.
+    /// - `origin`: the `Origin` header. Absent/empty ⇒ allowed (curl / Claude
+    ///   Code omit it). Present ⇒ its URL host must be loopback, else rejected
+    ///   (a cross-origin browser fetch to `127.0.0.1` carries a non-loopback
+    ///   `Origin` and is cut here).
+    public static func originHostAllowed(host: String?, origin: String?) -> Bool {
+        if let host, !host.isEmpty, !isLoopbackHostHeader(host) { return false }
+        if let origin, !origin.isEmpty, !isLoopbackOrigin(origin) { return false }
+        return true
+    }
+
+    /// Loopback host check on a bare host string (no port), tolerant of a
+    /// bracketed IPv6 literal (`[::1]`).
+    static func isLoopbackHost(_ raw: String) -> Bool {
+        var h = raw.lowercased()
+        if h.hasPrefix("[") && h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
+        if h == "localhost" || h == "127.0.0.1" || h == "::1" { return true }
+        if h.hasPrefix("127.") { return true }  // 127.0.0.0/8
+        return false
+    }
+
+    /// Loopback check on a raw `Host` header value (may carry a `:port`).
+    static func isLoopbackHostHeader(_ raw: String) -> Bool {
+        isLoopbackHost(hostPart(ofHostHeader: raw))
+    }
+
+    /// Extract the host portion of a `Host` header, stripping a trailing
+    /// `:port`. Handles `[::1]` / `[::1]:port` (bracketed IPv6) and the
+    /// `host:port` form; a bare (bracketless) IPv6 with multiple colons is
+    /// returned verbatim (a Host header should bracket IPv6 anyway).
+    static func hostPart(ofHostHeader raw: String) -> String {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("[") {
+            if let close = t.firstIndex(of: "]") {
+                return String(t[t.index(after: t.startIndex)..<close])
+            }
+            return t
+        }
+        if t.filter({ $0 == ":" }).count == 1, let colon = t.firstIndex(of: ":") {
+            let after = t[t.index(after: colon)...]
+            if !after.isEmpty && after.allSatisfy(\.isNumber) {
+                return String(t[..<colon])
+            }
+        }
+        return t
+    }
+
+    /// Loopback check on an `Origin` header value (a URL like
+    /// `http://127.0.0.1:39842`). A malformed / opaque origin (`null`) has no
+    /// URL host and is rejected.
+    static func isLoopbackOrigin(_ origin: String) -> Bool {
+        let trimmed = origin.trimmingCharacters(in: .whitespaces)
+        guard let comps = URLComponents(string: trimmed), let host = comps.host else {
+            return false
+        }
+        return isLoopbackHost(host)
+    }
+
+    /// Canonical 401 for a write with a missing/invalid bearer token (B1b).
+    /// Carries `WWW-Authenticate: Bearer` per RFC 6750. Byte-identical for
+    /// REST + MCP.
+    static func unauthorizedResponse() -> HTTPResponse {
+        let body = Data(#"{"error":"missing or invalid bearer token (Authorization: Bearer <token>)"}"#.utf8)
+        return HTTPResponse(
+            status: 401,
+            statusText: "Unauthorized",
+            headers: [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("WWW-Authenticate", "Bearer"),
+            ],
+            body: body
+        )
+    }
+
+    /// Canonical 403 for a write rejected by the Origin/Host loopback check
+    /// (B1b — the DNS-rebinding cut). Distinct message from the `allow_writes`
+    /// 403 so a caller can tell the two apart.
+    static func forbiddenOriginResponse() -> HTTPResponse {
+        let body = Data(#"{"error":"cross-origin or non-loopback host rejected (loopback-only writes)"}"#.utf8)
         return HTTPResponse(
             status: 403,
             statusText: "Forbidden",

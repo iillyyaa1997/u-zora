@@ -44,6 +44,12 @@ METRICS_DB="$E2E_TMP/metrics.sqlite"
 CONFIG_PATH="$E2E_TMP/config.toml"
 WATCHDOG_STATE="$E2E_TMP/watchdog-state.json"
 FINDINGS_STATE="$E2E_TMP/findings-state.json"
+# B1b: the bridge bearer-token sidecar (0600). The app generates it on first
+# launch at this overridable path; the harness reads it and presents it on WRITE
+# requests only (reads stay unauthenticated). Persists across the relaunches
+# below (same path → same token).
+BRIDGE_TOKEN_PATH="$E2E_TMP/bridge-token"
+TOKEN=""
 # Q10: isolate the actions audit log (directory) so the harness never
 # touches the operator's real ~/Library/Application Support/uZora audit.
 ACTIONS_AUDIT_DIR="$E2E_TMP/actions-audit"
@@ -147,6 +153,7 @@ launch_app() {
   UZORA_WATCHDOG_STATE_PATH="$WATCHDOG_STATE" \
   UZORA_FINDINGS_STATE_PATH="$FINDINGS_STATE" \
   UZORA_ACTIONS_AUDIT_PATH="$ACTIONS_AUDIT_DIR" \
+  UZORA_BRIDGE_TOKEN_PATH="$BRIDGE_TOKEN_PATH" \
   UZORA_E2E_SYNTHETIC_ALERT="$mode" \
     "$APP_BUNDLE/Contents/MacOS/uZora" >>"$APP_LOG" 2>&1 &
   APP_PID=$!
@@ -164,12 +171,37 @@ wait_for_http() {
   return 1
 }
 
+# read_bridge_token — poll for the app-generated 0600 token sidecar (B1b) and
+# load it into $TOKEN. The app writes it during bootstrap (before the HTTP
+# listener answers), so it's normally present the instant /status responds;
+# poll briefly regardless.
+read_bridge_token() {
+  local tries=0
+  while [ $tries -lt 25 ]; do
+    if [ -s "$BRIDGE_TOKEN_PATH" ]; then
+      TOKEN="$(tr -d '[:space:]' < "$BRIDGE_TOKEN_PATH")"
+      [ -n "$TOKEN" ] && return 0
+    fi
+    sleep 0.2; tries=$((tries+1))
+  done
+  return 1
+}
+
 # ===========================================================================
 # Run 1 — synthetic warn alert.
 # ===========================================================================
 section "Launch (synthetic=warn)"
 launch_app warn
 if wait_for_http; then pass "HTTP server reachable"; else fail "HTTP server reachable" "see $APP_LOG"; tail -20 "$APP_LOG"; exit 1; fi
+
+section "Bridge auth token (B1b)"
+# The write tier now requires a bearer token; grab it from the sidecar the app
+# just generated. Reads below stay unauthenticated (must still pass with none).
+if read_bridge_token; then
+  pass "bridge-token sidecar generated (${TOKEN:0:8}…)"
+else
+  fail "bridge-token sidecar generated" "no token at $BRIDGE_TOKEN_PATH"
+fi
 
 section "REST /status"
 STATUS="$(curl -fsS --max-time 3 "$BASE/status")"
@@ -239,14 +271,17 @@ assert_jq   "initialize serverInfo.name"   "$MCP_INIT" '.result.serverInfo.name'
 
 MCP_TOOLS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$BASE/mcp")"
-# 8 read tools (Q10 uzora_list_actions + Phase 5 list_findings/get_verdict) +
-# 2 write tools (write tools always listed; allow_writes defaults true here).
-assert_jq   "tools/list has 10 tools"      "$MCP_TOOLS" '.result.tools | length' '10'
+# 10 read tools (Q10 uzora_list_actions + Phase 5 list_findings/get_verdict +
+# B1a list_metrics/get_layout) + 2 write tools (write tools always listed;
+# allow_writes defaults true here).
+assert_jq   "tools/list has 12 tools"      "$MCP_TOOLS" '.result.tools | length' '12'
 assert_contains "tools/list has uzora_status"     "$MCP_TOOLS" 'uzora_status'
 assert_contains "tools/list has uzora_list_alerts" "$MCP_TOOLS" 'uzora_list_alerts'
 assert_contains "tools/list has uzora_list_actions" "$MCP_TOOLS" 'uzora_list_actions'
 assert_contains "tools/list has uzora_list_findings" "$MCP_TOOLS" 'uzora_list_findings'
 assert_contains "tools/list has uzora_get_verdict" "$MCP_TOOLS" 'uzora_get_verdict'
+assert_contains "tools/list has uzora_list_metrics" "$MCP_TOOLS" 'uzora_list_metrics'
+assert_contains "tools/list has uzora_get_layout"  "$MCP_TOOLS" 'uzora_get_layout'
 assert_contains "tools/list has uzora_ack_alert"   "$MCP_TOOLS" 'uzora_ack_alert'
 assert_contains "tools/list has uzora_set_probe_config" "$MCP_TOOLS" 'uzora_set_probe_config'
 
@@ -314,8 +349,24 @@ FIRST_SEEN_BEFORE="$(printf '%s' "$ALERTS" | jq -r '.alerts[] | select(.probe=="
 # in the harness config, so these succeed; one negative check (unknown probe)
 # verifies the 400 path. The synthetic alert gives a deterministic ack target.
 # ===========================================================================
+section "B1b write auth — negative checks (401 no bearer, 403 cross-origin)"
+# A write with NO bearer is rejected 401 (and must NOT ack — the gate
+# short-circuits before touching state, so the real ack below still succeeds).
+NOAUTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -d '{"id":"synthetic:e2e"}' "$BASE/alerts/ack")"
+[ "$NOAUTH_CODE" = "401" ] && pass "write without bearer → 401" || fail "write without bearer → 401" "got $NOAUTH_CODE"
+# A write with a VALID bearer but a cross-Origin header is rejected 403
+# (the DNS-rebinding cut).
+XORIGIN_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" -H 'Origin: https://evil.com' \
+  -d '{"id":"synthetic:e2e"}' "$BASE/alerts/ack")"
+[ "$XORIGIN_CODE" = "403" ] && pass "cross-Origin write → 403" || fail "cross-Origin write → 403" "got $XORIGIN_CODE"
+# A READ stays open with no bearer (regression guard: auth must not leak to reads).
+READ_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BASE/status")"
+[ "$READ_CODE" = "200" ] && pass "read without bearer → 200 (unchanged)" || fail "read without bearer → 200" "got $READ_CODE"
+
 section "REST write — POST /alerts/ack"
-ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"id":"synthetic:e2e"}' "$BASE/alerts/ack")"
 assert_jq   "ack returns acknowledged=true" "$ACK" '.acknowledged' 'true'
 assert_jq   "ack echoes id"                 "$ACK" '.id' 'synthetic:e2e'
@@ -330,14 +381,14 @@ assert_jq   "/status acked count >= 1"      "$STATUS_ACKED" '.acknowledged_alert
 
 section "REST write — ack unknown id → 404"
 ACK_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
-  -H 'Content-Type: application/json' -d '{"id":"nope:nothing"}' "$BASE/alerts/ack")"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" -d '{"id":"nope:nothing"}' "$BASE/alerts/ack")"
 [ "$ACK_404_CODE" = "404" ] && pass "ack unknown id returns 404" || fail "ack unknown id returns 404" "got $ACK_404_CODE"
 
 section "MCP write — uzora_ack_alert dispatch"
 # Re-ack the already-acked synthetic via MCP. Corrected contract: a no-op
 # re-ack is NOT a fresh ack — it returns 200 (alert IS acked) but
 # acknowledged=false + already=true so the caller can tell nothing changed.
-MCP_ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+MCP_ACK="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"uzora_ack_alert","arguments":{"id":"synthetic:e2e"}}}' "$BASE/mcp")"
 assert_jq   "MCP re-ack not error"          "$MCP_ACK" '.result.isError' 'false'
 assert_jq   "MCP re-ack is no-op"           "$MCP_ACK" '.result.structuredContent.acknowledged' 'false'
@@ -345,7 +396,7 @@ assert_jq   "MCP re-ack flags already"      "$MCP_ACK" '.result.structuredConten
 
 section "REST write — POST /config/probe (disable then re-enable cpu_temp)"
 # Disable cpu_temp; the hot-reload observer must drop it from the registry.
-DISABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+DISABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"probe":"cpu_temp","enabled":false}' "$BASE/config/probe")"
 assert_jq   "reconfigure updated=true"      "$DISABLE" '.updated' 'true'
 assert_jq   "reconfigure echoes probe"      "$DISABLE" '.probe' 'cpu_temp'
@@ -369,7 +420,7 @@ sleep 1
 
 # Re-enable cpu_temp so config.toml is restored to all-enabled before the
 # restart runs (keeps the probes_registered=12 invariant intact on relaunch).
-ENABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+ENABLE="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"probe":"cpu_temp","enabled":true}' "$BASE/config/probe")"
 assert_jq   "re-enable updated=true"        "$ENABLE" '.config.enabled' 'true'
 RESTORED=0
@@ -388,11 +439,11 @@ fi
 
 section "REST write — reconfigure unknown probe → 400"
 BAD_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
-  -H 'Content-Type: application/json' -d '{"probe":"does_not_exist","enabled":false}' "$BASE/config/probe")"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" -d '{"probe":"does_not_exist","enabled":false}' "$BASE/config/probe")"
 [ "$BAD_PROBE_CODE" = "400" ] && pass "unknown-probe reconfigure returns 400" || fail "unknown-probe reconfigure returns 400" "got $BAD_PROBE_CODE"
 
 section "REST write — threshold on fan is rejected (warning, not persisted)"
-FAN_W="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
+FAN_W="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"probe":"fan","warn_threshold":999,"poll_interval_sec":42}' "$BASE/config/probe")"
 assert_jq   "fan reconfigure updated=true"  "$FAN_W" '.updated' 'true'
 assert_jq   "fan threshold not persisted"   "$FAN_W" '.config.warn_threshold // "absent"' 'absent'

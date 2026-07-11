@@ -47,7 +47,11 @@ public struct MCPServer: Sendable {
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
         // Request headers are lowercased by `HTTPRequest.parse`.
         let sessionID = request.headers["mcp-session-id"]
-        let response = await handleInner(request)
+        // B1b: lift the write-tier auth material (Authorization / Origin / Host)
+        // off the HTTP request ONCE and thread it down to the write tools. Reads
+        // ignore it. A batch shares the one request's headers → one context.
+        let auth = WriteAuthContext(headers: request.headers)
+        let response = await handleInner(request, auth: auth)
         return MCPServer.echoingSession(response, sessionID: sessionID)
     }
 
@@ -77,7 +81,7 @@ public struct MCPServer: Sendable {
         )
     }
 
-    private func handleInner(_ request: HTTPRequest) async -> HTTPResponse {
+    private func handleInner(_ request: HTTPRequest, auth: WriteAuthContext) async -> HTTPResponse {
         guard request.method == "POST" else {
             return MCPServer.methodNotAllowed()
         }
@@ -88,7 +92,7 @@ public struct MCPServer: Sendable {
         // Accept both single envelopes and batches.
         let body = request.body
         if let first = body.first, first == UInt8(ascii: "[") {
-            return await handleBatch(body)
+            return await handleBatch(body, auth: auth)
         }
         let envelope: JSONRPCRequest
         do {
@@ -100,7 +104,7 @@ public struct MCPServer: Sendable {
                 message: "json decode failed: \(error)"
             ))
         }
-        let response = await dispatch(envelope)
+        let response = await dispatch(envelope, auth: auth)
         if let response {
             return MCPServer.jsonResponse(response)
         } else {
@@ -109,7 +113,7 @@ public struct MCPServer: Sendable {
         }
     }
 
-    private func handleBatch(_ body: Data) async -> HTTPResponse {
+    private func handleBatch(_ body: Data, auth: WriteAuthContext) async -> HTTPResponse {
         let requests: [JSONRPCRequest]
         do {
             requests = try JSONRPCRequest.decodeArray(from: body)
@@ -122,7 +126,7 @@ public struct MCPServer: Sendable {
         }
         var responses: [JSONRPCResponse] = []
         for r in requests {
-            if let resp = await dispatch(r) {
+            if let resp = await dispatch(r, auth: auth) {
                 responses.append(resp)
             }
         }
@@ -134,8 +138,9 @@ public struct MCPServer: Sendable {
     }
 
     /// Dispatch one envelope. Returns nil when the envelope is a
-    /// notification (no `id` → no response).
-    private func dispatch(_ envelope: JSONRPCRequest) async -> JSONRPCResponse? {
+    /// notification (no `id` → no response). `auth` carries the write-tier auth
+    /// material (B1b) for the two write tools; read tools ignore it.
+    private func dispatch(_ envelope: JSONRPCRequest, auth: WriteAuthContext) async -> JSONRPCResponse? {
         let isNotification = envelope.id == nil
         // Method routing.
         switch envelope.method {
@@ -184,7 +189,7 @@ public struct MCPServer: Sendable {
                 args = .object([:])
             }
             do {
-                let result = try await tools.invoke(name: name, arguments: args)
+                let result = try await tools.invoke(name: name, arguments: args, auth: auth)
                 return JSONRPCResponse.result(id: envelope.id, result: result)
             } catch let error as MCPTools.InvokeError {
                 return JSONRPCResponse.error(

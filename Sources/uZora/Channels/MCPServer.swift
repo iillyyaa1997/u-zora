@@ -33,9 +33,53 @@ public struct MCPServer: Sendable {
 
     /// HTTP handler — parses the JSON-RPC envelope, dispatches the method,
     /// returns the JSON-RPC response.
+    ///
+    /// Streamable-HTTP tolerance (plan D-L6, spec-conformance only — no auth):
+    /// - A non-POST verb (e.g. a browser GET probing `/mcp` for a server-push
+    ///   SSE stream, which uZora doesn't offer) returns **405** with `Allow:
+    ///   POST`, not a 404/400.
+    /// - A normal JSON-RPC POST answers `application/json` (via `jsonData`).
+    /// - An `Mcp-Session-Id` request header is TOLERATED: accepted and echoed
+    ///   back on the response (never rejected). uZora is stateless/loopback so
+    ///   it assigns no session of its own; echoing keeps spec-compliant clients
+    ///   happy. Origin validation is intentionally NOT done here (that is the
+    ///   B1b auth phase).
     public func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        // Request headers are lowercased by `HTTPRequest.parse`.
+        let sessionID = request.headers["mcp-session-id"]
+        let response = await handleInner(request)
+        return MCPServer.echoingSession(response, sessionID: sessionID)
+    }
+
+    /// Re-emit `response` with the client's `Mcp-Session-Id` echoed back as a
+    /// response header (no-op when the client sent none).
+    static func echoingSession(_ response: HTTPResponse, sessionID: String?) -> HTTPResponse {
+        guard let sessionID, !sessionID.isEmpty else { return response }
+        return HTTPResponse(
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers + [("Mcp-Session-Id", sessionID)],
+            body: response.body
+        )
+    }
+
+    /// 405 for any non-POST verb on `/mcp` (streamable-HTTP tolerance). Carries
+    /// `Allow: POST` so a conformant client knows the supported method.
+    static func methodNotAllowed() -> HTTPResponse {
+        HTTPResponse(
+            status: 405,
+            statusText: HTTPResponse.statusText(for: 405),
+            headers: [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Allow", "POST"),
+            ],
+            body: Data(#"{"error":"MCP endpoint accepts POST (JSON-RPC 2.0) only"}"#.utf8)
+        )
+    }
+
+    private func handleInner(_ request: HTTPRequest) async -> HTTPResponse {
         guard request.method == "POST" else {
-            return HTTPResponse.badRequest("MCP requires POST")
+            return MCPServer.methodNotAllowed()
         }
         guard !request.body.isEmpty else {
             return HTTPResponse.badRequest("MCP requires JSON-RPC body")

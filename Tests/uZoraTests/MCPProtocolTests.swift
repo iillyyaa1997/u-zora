@@ -60,16 +60,18 @@ struct MCPProtocolTests {
         #expect(code == 200)
         let result = json?["result"] as? [String: Any]
         let tools = result?["tools"] as? [[String: Any]]
-        // Eight read tools + two write tools (write tools are always listed,
+        // Ten read tools + two write tools (write tools are always listed,
         // even when allow_writes is off, so clients get a clear 403). Read
         // tools: status / list_alerts / list_probes / list_actions (Q10) /
-        // get_metric / subscribe / list_findings + get_verdict (Phase 5).
-        #expect(tools?.count == 10)
+        // get_metric / subscribe / list_findings + get_verdict (Phase 5) /
+        // list_metrics + get_layout (B1a).
+        #expect(tools?.count == 12)
         let names = Set(tools?.compactMap { $0["name"] as? String } ?? [])
         #expect(names == [
             "uzora_status", "uzora_list_alerts", "uzora_list_probes",
             "uzora_list_actions", "uzora_get_metric", "uzora_subscribe",
             "uzora_list_findings", "uzora_get_verdict",
+            "uzora_list_metrics", "uzora_get_layout",
             "uzora_ack_alert", "uzora_set_probe_config",
         ])
         await server.stop()

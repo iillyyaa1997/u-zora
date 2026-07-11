@@ -219,6 +219,70 @@ public actor MetricsStore {
         return Int(sqlite3_column_int64(s, 0))
     }
 
+    /// One catalog entry: a distinct `(probe, name)` metric series actually
+    /// present in the store, plus its sample `count`, last value, and last
+    /// timestamp. Powers `list_metrics` / `GET /metrics/catalog` so an LLM can
+    /// enumerate the real series instead of guessing name strings.
+    public struct Series: Sendable, Codable, Equatable {
+        public let probe: String
+        public let name: String
+        public let count: Int
+        public let lastValue: Double
+        public let lastAt: Date
+        public init(probe: String, name: String, count: Int, lastValue: Double, lastAt: Date) {
+            self.probe = probe
+            self.name = name
+            self.count = count
+            self.lastValue = lastValue
+            self.lastAt = lastAt
+        }
+    }
+
+    /// Enumerate the distinct `(probe, name)` series in the store, each with its
+    /// row count + most-recent value/timestamp. Sorted by `(probe, name)` for a
+    /// stable catalog. An empty store yields `[]`.
+    ///
+    /// The inner aggregate computes the per-series count + MAX(at); the outer
+    /// join pulls the value at that latest timestamp (a tie on `at` collapses to
+    /// one arbitrary row via the outer `GROUP BY` — acceptable for a "last
+    /// value" hint).
+    public func distinctSeries() async throws -> [Series] {
+        guard let db else { throw Error.closed }
+        let sql = """
+            SELECT s.probe, s.name, m.cnt, s.value, s.at
+            FROM samples s
+            JOIN (
+                SELECT probe, name, COUNT(*) AS cnt, MAX(at) AS max_at
+                FROM samples
+                GROUP BY probe, name
+            ) m ON s.probe = m.probe AND s.name = m.name AND s.at = m.max_at
+            GROUP BY s.probe, s.name
+            ORDER BY s.probe, s.name
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt else {
+            throw Error.prepareFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(s) }
+
+        var out: [Series] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            let probeStr = String(cString: sqlite3_column_text(s, 0))
+            let nameStr  = String(cString: sqlite3_column_text(s, 1))
+            let count    = Int(sqlite3_column_int64(s, 2))
+            let value    = sqlite3_column_double(s, 3)
+            let at       = sqlite3_column_double(s, 4)
+            out.append(Series(
+                probe: probeStr,
+                name: nameStr,
+                count: count,
+                lastValue: value,
+                lastAt: Date(timeIntervalSince1970: at)
+            ))
+        }
+        return out
+    }
+
     /// Close the underlying database. Idempotent.
     public func close() {
         if let db {

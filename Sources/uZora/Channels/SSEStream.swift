@@ -17,13 +17,25 @@ import os
 public struct SSEStream: Sendable {
 
     public let eventBus: EventBus
+    /// Parallel diagnosis-layer fan-out (plan D-L4). When wired, `/stream`
+    /// ALSO relays `FindingEvent`s + verdict-level transitions as the new
+    /// `diagnosed` / `rediagnosed` / `resolved` / `verdict_changed` SSE events —
+    /// WITHOUT touching the load-bearing `WatchdogEvent` path (D2). Optional +
+    /// defaulted to `nil` so existing callers/tests compile unchanged; a `nil`
+    /// bus simply means the diagnosis events are never emitted here.
+    public let diagnosisBus: DiagnosisEventBus?
     public let heartbeat: Duration
 
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "sse")
 
-    public init(eventBus: EventBus, heartbeat: Duration = .seconds(30)) {
+    public init(
+        eventBus: EventBus,
+        diagnosisBus: DiagnosisEventBus? = nil,
+        heartbeat: Duration = .seconds(30)
+    ) {
         self.eventBus = eventBus
+        self.diagnosisBus = diagnosisBus
         self.heartbeat = heartbeat
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -36,14 +48,30 @@ public struct SSEStream: Sendable {
     /// Handler entry point. Stays alive until the client disconnects
     /// (the streaming sink's connection goes to `.failed` / `.cancelled`).
     public func handle(request: HTTPRequest, sink: StreamingResponseSink) async {
-        // The bus subscriber pushes events onto an AsyncStream so the
-        // `handle` task can multiplex them with heartbeats and disconnect
-        // detection.
-        let stream = AsyncStream<EventWithTimestamp>.makeStream(bufferingPolicy: .bufferingNewest(256))
+        // Both bus subscribers push onto ONE AsyncStream carrying a small
+        // discriminated union, so the `handle` task multiplexes the two
+        // parallel fan-outs (WatchdogEvent + DiagnosisStreamEvent) together
+        // with heartbeats and disconnect detection.
+        let stream = AsyncStream<StreamItem>.makeStream(bufferingPolicy: .bufferingNewest(256))
         let token = await eventBus.subscribe { event in
-            stream.continuation.yield(EventWithTimestamp(timestamp: Date(), event: event))
+            stream.continuation.yield(.watchdog(EventWithTimestamp(timestamp: Date(), event: event)))
         }
         defer { Task { await eventBus.unsubscribe(token) } }
+
+        // Subscribe the SAME connection to the diagnosis fan-out (if wired),
+        // exactly the way the WatchdogEvent bus above is subscribed — a second
+        // independent broadcast path, so neither side knows about the other.
+        var diagnosisToken: UUID?
+        if let diagnosisBus {
+            diagnosisToken = await diagnosisBus.subscribe { event in
+                stream.continuation.yield(.diagnosis(DiagnosisEventWithTimestamp(timestamp: Date(), event: event)))
+            }
+        }
+        defer {
+            if let diagnosisToken, let diagnosisBus {
+                Task { await diagnosisBus.unsubscribe(diagnosisToken) }
+            }
+        }
 
         // Send an initial `:connected` comment so curl users see something
         // immediately and the TCP socket is confirmed flowing.
@@ -59,11 +87,21 @@ public struct SSEStream: Sendable {
         }
         defer { heartbeatTask.cancel() }
 
-        for await delivery in stream.stream {
+        for await item in stream.stream {
             if !sink.isOpen { break }
-            let frame = encodeFrame(delivery)
+            let frame: Frame
+            switch item {
+            case .watchdog(let delivery):  frame = encodeFrame(delivery)
+            case .diagnosis(let delivery): frame = encodeFrame(delivery)
+            }
             await sink.send(event: frame.event, data: frame.body)
         }
+    }
+
+    /// Internal multiplex tag so the two parallel fan-outs share one stream.
+    private enum StreamItem: Sendable {
+        case watchdog(EventWithTimestamp)
+        case diagnosis(DiagnosisEventWithTimestamp)
     }
 
     // MARK: - Frame encoding
@@ -71,6 +109,21 @@ public struct SSEStream: Sendable {
     public struct EventWithTimestamp: Sendable {
         public let timestamp: Date
         public let event: WatchdogEvent
+        public init(timestamp: Date, event: WatchdogEvent) {
+            self.timestamp = timestamp
+            self.event = event
+        }
+    }
+
+    /// Diagnosis-layer delivery (plan D-L4) — the sibling of
+    /// `EventWithTimestamp` for the `DiagnosisStreamEvent` fan-out.
+    public struct DiagnosisEventWithTimestamp: Sendable {
+        public let timestamp: Date
+        public let event: DiagnosisStreamEvent
+        public init(timestamp: Date, event: DiagnosisStreamEvent) {
+            self.timestamp = timestamp
+            self.event = event
+        }
     }
 
     public struct Frame: Equatable, Sendable {
@@ -92,6 +145,29 @@ public struct SSEStream: Sendable {
         case .appeared:  name = "appeared"
         case .escalated: name = "escalated"
         case .cleared:   name = "cleared"
+        }
+        return Frame(event: name, body: body)
+    }
+
+    /// Encode one diagnosis-layer delivery into an SSE `Frame` (plan D-L4).
+    /// New event names: `diagnosed` / `rediagnosed` / `resolved` (one per
+    /// `FindingEvent` kind) + `verdict_changed`. The body mirrors the
+    /// `JSONLEventSink.Line` shape via `DiagnosisEventLine` (snake_case keys).
+    public func encodeFrame(_ delivery: DiagnosisEventWithTimestamp) -> Frame {
+        let line = DiagnosisEventLine(timestamp: delivery.timestamp, event: delivery.event)
+        let data: Data
+        do {
+            data = try encoder.encode(line)
+        } catch {
+            data = Data("{\"error\":\"encode failed: \(error)\"}".utf8)
+        }
+        let body = String(data: data, encoding: .utf8) ?? "{}"
+        let name: String
+        switch delivery.event {
+        case .finding(.diagnosed):   name = "diagnosed"
+        case .finding(.rediagnosed): name = "rediagnosed"
+        case .finding(.resolved):    name = "resolved"
+        case .verdictChanged:        name = "verdict_changed"
         }
         return Frame(event: name, body: body)
     }

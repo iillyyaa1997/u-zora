@@ -21,6 +21,10 @@ public actor ChannelHost {
     /// `GET /verdict` (+ the MCP read tools). Optional + defaulted to `nil`
     /// so existing `ChannelHost(...)` call sites + tests compile unchanged.
     public let diagnosisStore: DiagnosisStore?
+    /// B1a: parallel diagnosis-layer fan-out (plan D-L4). When wired, `SSEStream`
+    /// ALSO relays finding + verdict events onto `/stream`. Optional + defaulted
+    /// to `nil` so existing call sites/tests compile unchanged.
+    public let diagnosisBus: DiagnosisEventBus?
     public let httpServer: HTTPServer
     public let rest: RESTHandlers
     public let sse: SSEStream
@@ -41,7 +45,8 @@ public actor ChannelHost {
         configLoader: ConfigLoader? = nil,
         allowWrites: Bool = true,
         actionRunner: ActionRunner? = nil,
-        diagnosisStore: DiagnosisStore? = nil
+        diagnosisStore: DiagnosisStore? = nil,
+        diagnosisBus: DiagnosisEventBus? = nil
     ) {
         self.port = port
         self.state = state
@@ -49,6 +54,7 @@ public actor ChannelHost {
         self.metrics = metrics
         self.actionRunner = actionRunner
         self.diagnosisStore = diagnosisStore
+        self.diagnosisBus = diagnosisBus
         self.eventBus = eventBus
         let httpServer = HTTPServer(port: port)
         self.httpServer = httpServer
@@ -61,7 +67,7 @@ public actor ChannelHost {
             diagnosisStore: diagnosisStore
         )
         self.rest = rest
-        self.sse = SSEStream(eventBus: eventBus)
+        self.sse = SSEStream(eventBus: eventBus, diagnosisBus: diagnosisBus)
         self.mcp = MCPServer(tools: MCPTools(
             rest: rest,
             httpBaseURL: "http://127.0.0.1:\(port)"
@@ -136,6 +142,14 @@ public actor ChannelHost {
             let to = req.query["to"].flatMap { RESTHandlers.parseISO8601($0) }
             return await rest.metrics(probe: probe, name: name, from: from, to: to)
         }
+        // B1a (plan D-L5): catalog of the distinct metric series in the store.
+        await httpServer.register(method: "GET", path: "/metrics/catalog") { _ in
+            await rest.metricsCatalog()
+        }
+        // B1a (plan D-C4): read-only effective popover layout.
+        await httpServer.register(method: "GET", path: "/layout") { _ in
+            await rest.layout()
+        }
         await httpServer.register(method: "GET", path: "/findings") { req in
             let floor = req.query["severity"].flatMap { Severity(rawValue: $0) }
             return await rest.findings(minSeverity: floor)
@@ -144,6 +158,12 @@ public actor ChannelHost {
             await rest.verdict()
         }
         await httpServer.register(method: "POST", path: "/mcp") { req in
+            await mcp.handle(req)
+        }
+        // B1a (plan D-L6): streamable-HTTP tolerance — a non-POST GET to /mcp
+        // returns 405 (Allow: POST) instead of a bare 404. `mcp.handle` itself
+        // returns the 405 for any non-POST verb, so this is single-sourced.
+        await httpServer.register(method: "GET", path: "/mcp") { req in
             await mcp.handle(req)
         }
         // Write endpoints (Phase 7). Both take their identifier in the JSON

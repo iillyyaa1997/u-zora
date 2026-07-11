@@ -55,14 +55,35 @@ public struct MCPTools: Sendable {
 
         case "uzora_get_metric":
             var probe: String? = nil
+            var name: String? = nil
             var fromDate: Date? = nil
             var toDate: Date? = nil
             if case .object(let args) = arguments {
                 if case .string(let s)? = args["probe"] { probe = s }
+                // B1a: MCP parity with REST — `name` selects one metric series
+                // within a probe (e.g. probe=battery, name=charge_pct). REST
+                // already honoured it; the MCP tool previously dropped it.
+                if case .string(let s)? = args["name"]  { name = s }
                 if case .string(let s)? = args["from"] { fromDate = RESTHandlers.parseISO8601(s) }
                 if case .string(let s)? = args["to"]   { toDate   = RESTHandlers.parseISO8601(s) }
             }
-            let resp = await rest.metrics(probe: probe, from: fromDate, to: toDate)
+            let resp = await rest.metrics(probe: probe, name: name, from: fromDate, to: toDate)
+            return MCPTools.wrap(resp)
+
+        case "uzora_list_metrics":
+            // Read-only (B1a, plan D-L5): enumerate the distinct metric series
+            // actually present (source: MetricsStore.distinctSeries()) so an LLM
+            // stops guessing name strings. Single-sourced through the same REST
+            // handler `GET /metrics/catalog` uses.
+            let resp = await rest.metricsCatalog()
+            return MCPTools.wrap(resp)
+
+        case "uzora_get_layout":
+            // Read-only (B1a, plan D-C4): the CURRENT effective popover layout
+            // (blocks + tiles with visibility/order), resolved from the live
+            // config preset + optional customized layout JSON. Same handler as
+            // `GET /layout`; no write path.
+            let resp = await rest.layout()
             return MCPTools.wrap(resp)
 
         case "uzora_list_findings":
@@ -122,21 +143,28 @@ public struct MCPTools: Sendable {
             return MCPTools.wrap(resp)
 
         case "uzora_subscribe":
-            // Phase 4 simplification: MCP notifications-over-SSE-transport
-            // is deferred to Phase 6+. Until then, the tool returns the
-            // SSE URL so the LLM client knows where to subscribe.
+            // MCP notifications-over-SSE-transport is deferred; until then the
+            // tool returns the real `GET /stream` SSE URL so the LLM client
+            // knows where to subscribe. B1a: `/stream` now carries the
+            // diagnosis fan-out too, so advertise ALL event names — the three
+            // watchdog events PLUS the new diagnosis events (plan D-L4).
             let url = "\(httpBaseURL)/stream"
+            let events: [JSONValue] = [
+                "appeared", "escalated", "cleared",
+                "diagnosed", "rediagnosed", "resolved", "verdict_changed",
+            ].map { .string($0) }
             return .object([
                 "content": .array([
                     .object([
                         "type": .string("text"),
-                        "text": .string("Connect to \(url) (Server-Sent Events) for real-time uZora watchdog events. Phase 4 MVP delegates the long-poll to SSE; future versions will push notifications natively via MCP.")
+                        "text": .string("Connect to \(url) (Server-Sent Events) for real-time uZora updates. Watchdog alert events: appeared / escalated / cleared. Diagnosis events (plan D-L4): diagnosed / rediagnosed / resolved (per finding) and verdict_changed (aggregate good/watch/degraded/problem transitions). MCP notifications-over-transport are deferred to a later phase; subscribe to the SSE URL instead.")
                     ])
                 ]),
                 "structuredContent": .object([
                     "sse_url": .string(url),
                     "transport": .string("server-sent-events"),
-                    "phase4_note": .string("MCP notifications-over-transport deferred to Phase 6+; subscribe to the SSE URL instead.")
+                    "events": .array(events),
+                    "note": .string("MCP notifications-over-transport deferred; subscribe to the SSE URL. /stream carries watchdog alert events + diagnosis findings/verdict events.")
                 ])
             ])
 
@@ -237,13 +265,17 @@ public struct MCPTools: Sendable {
         ],
         [
             "name": .string("uzora_get_metric"),
-            "description": .string("Get the historical metric series for a probe between two timestamps. Phase 4 returns the shape only; backing SQLite store lands in Phase 5."),
+            "description": .string("Get the historical metric series for a probe between two timestamps. Optionally narrow to a single metric series with `name` (use uzora_list_metrics to discover the (probe, name) pairs)."),
             "inputSchema": .object([
                 "type": .string("object"),
                 "properties": .object([
                     "probe": .object([
                         "type": .string("string"),
                         "description": .string("Probe name, e.g. 'disk', 'cpu_temp', 'thermal'."),
+                    ]),
+                    "name": .object([
+                        "type": .string("string"),
+                        "description": .string("Optional metric series name within the probe, e.g. 'temp_c', 'free_pct', 'charge_pct'. Omit for all of the probe's series. Discover valid names via uzora_list_metrics."),
                     ]),
                     "from": .object([
                         "type": .string("string"),
@@ -255,6 +287,22 @@ public struct MCPTools: Sendable {
                     ]),
                 ]),
                 "required": .array([.string("probe")]),
+            ]),
+        ],
+        [
+            "name": .string("uzora_list_metrics"),
+            "description": .string("List the available metric series — the distinct (probe, name) pairs actually recorded in the store, each with its sample count and most-recent value/timestamp. Use this to discover exact metric names for uzora_get_metric instead of guessing."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([:]),
+            ]),
+        ],
+        [
+            "name": .string("uzora_get_layout"),
+            "description": .string("Read-only: return the CURRENT effective menu-bar popover layout — the ordered content blocks and System-overview tiles, each with its visibility — resolved from the active preset (minimal/balanced/diagnosis/power) plus any customized layout JSON. Does not modify anything."),
+            "inputSchema": .object([
+                "type": .string("object"),
+                "properties": .object([:]),
             ]),
         ],
         [
@@ -281,7 +329,7 @@ public struct MCPTools: Sendable {
         ],
         [
             "name": .string("uzora_subscribe"),
-            "description": .string("Return the Server-Sent Events URL the client should connect to for real-time watchdog events. Phase 4 delegates notifications to SSE; future MCP versions will push tool results natively."),
+            "description": .string("Return the Server-Sent Events URL to connect to for real-time updates over GET /stream. Carries watchdog alert events (appeared / escalated / cleared) AND diagnosis events (diagnosed / rediagnosed / resolved per finding, plus verdict_changed on aggregate health transitions). MCP notifications-over-transport are deferred; subscribe to the SSE URL instead."),
             "inputSchema": .object([
                 "type": .string("object"),
                 "properties": .object([:]),

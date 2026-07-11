@@ -208,6 +208,45 @@ public struct RESTHandlers: Sendable {
         }
     }
 
+    // MARK: - GET /metrics/catalog  (B1a — list the known metric series)
+
+    /// Response for `GET /metrics/catalog` + `uzora_list_metrics`: the distinct
+    /// `(probe, name)` series actually present in the store, so an LLM enumerates
+    /// the real series instead of guessing name strings. snake_case keys
+    /// (`last_value` / `last_at`) mirror the rest of the surface. `note` is
+    /// non-nil only on the degraded (no-store) path.
+    public struct MetricsCatalogResponse: Codable, Sendable {
+        public let series: [MetricsStore.Series]
+        public let count: Int
+        public let note: String?
+        public init(series: [MetricsStore.Series], note: String? = nil) {
+            self.series = series
+            self.count = series.count
+            self.note = note
+        }
+    }
+
+    /// `GET /metrics/catalog` — enumerate the distinct metric series in the
+    /// store (source: `MetricsStore.distinctSeries()` — the real persisted
+    /// `(probe, name)` pairs). When no store is wired the endpoint still answers
+    /// `200` with an empty list + an explanatory `note`, exactly like
+    /// `metrics()` degrades.
+    public func metricsCatalog() async -> HTTPResponse {
+        guard let store = metricsStore else {
+            return encode(MetricsCatalogResponse(
+                series: [],
+                note: "metrics store not wired (running headless?)"
+            ), status: 200)
+        }
+        do {
+            let series = try await store.distinctSeries()
+            return encode(MetricsCatalogResponse(series: series), status: 200)
+        } catch {
+            log.error("metrics catalog query failed: \(String(describing: error), privacy: .public)")
+            return HTTPResponse.serverError("metrics catalog query failed: \(error)")
+        }
+    }
+
     // MARK: - POST /alerts/ack  (write — acknowledge an alert)
 
     public struct AckResponse: Codable, Sendable {
@@ -598,6 +637,70 @@ public struct RESTHandlers: Sendable {
         return encode(VerdictResponse(verdict: v), status: 200)
     }
 
+    // MARK: - GET /layout  (D-C4 — read-only effective popover layout)
+
+    /// Response for `GET /layout` + `uzora_get_layout`: the CURRENT effective
+    /// popover layout (blocks + tiles, each with visibility, in order). Read
+    /// tier — no write path. `source` is `"preset"` (the named preset used
+    /// as-is) or `"custom"` (a valid customized `layoutJSON` forked the preset).
+    /// `note` is non-nil only on the degraded (no-config) path.
+    public struct LayoutResponse: Codable, Sendable {
+        /// One block/tile entry: its kind rawValue + visibility, in layout order.
+        public struct Entry: Codable, Sendable {
+            public let kind: String
+            public let visible: Bool
+            public init(kind: String, visible: Bool) {
+                self.kind = kind
+                self.visible = visible
+            }
+        }
+        public let preset: String
+        public let source: String
+        public let blocks: [Entry]
+        public let tiles: [Entry]
+        public let note: String?
+        public init(preset: String, source: String, blocks: [Entry], tiles: [Entry], note: String? = nil) {
+            self.preset = preset
+            self.source = source
+            self.blocks = blocks
+            self.tiles = tiles
+            self.note = note
+        }
+    }
+
+    /// `GET /layout` — return the resolved effective popover layout via the
+    /// existing `effectiveLayout(preset:layoutJSON:)` resolver (A3a) over the
+    /// live `config.ui.popover.preset` / `.layoutJSON`. When no ConfigLoader is
+    /// wired the endpoint still answers `200` with the default preset's layout
+    /// + an explanatory `note` (same graceful degradation as `metrics()` /
+    /// `findings()`). READ-ONLY — no auth change, no mutation.
+    public func layout() async -> HTTPResponse {
+        let preset: String
+        let layoutJSON: String
+        let note: String?
+        if let loader = configLoader {
+            let cfg = await loader.current
+            preset = cfg.ui.popover.preset
+            layoutJSON = cfg.ui.popover.layoutJSON
+            note = nil
+        } else {
+            preset = PresetName.default.rawValue
+            layoutJSON = ""
+            note = "config not wired (running headless?); returning default preset layout"
+        }
+        let resolved = effectiveLayout(preset: preset, layoutJSON: layoutJSON)
+        // `source` mirrors `effectiveLayout`'s own precedence: a non-empty
+        // layoutJSON that parses wins ("custom"); otherwise the named preset.
+        let trimmed = layoutJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = (!trimmed.isEmpty && PopoverLayout(jsonString: trimmed) != nil) ? "custom" : "preset"
+        let blocks = resolved.blocks.map { LayoutResponse.Entry(kind: $0.kind.rawValue, visible: $0.visible) }
+        let tiles = resolved.tiles.map { LayoutResponse.Entry(kind: $0.kind.rawValue, visible: $0.visible) }
+        return encode(
+            LayoutResponse(preset: preset, source: source, blocks: blocks, tiles: tiles, note: note),
+            status: 200
+        )
+    }
+
     // MARK: - Probe name ↔ ProbeOverride keypath mapping
 
     /// The 10 config-known probe names (TOML keys), derived from the single
@@ -646,6 +749,10 @@ public struct RESTHandlers: Sendable {
             let from = request.query["from"].flatMap { Self.parseISO8601($0) }
             let to = request.query["to"].flatMap { Self.parseISO8601($0) }
             return await metrics(probe: probe, name: name, from: from, to: to)
+        case ("GET", "/metrics/catalog"):
+            return await metricsCatalog()
+        case ("GET", "/layout"):
+            return await layout()
         case ("GET", "/findings"):
             let floor = request.query["severity"].flatMap { Severity(rawValue: $0) }
             return await findings(minSeverity: floor)

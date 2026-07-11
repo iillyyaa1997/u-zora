@@ -364,6 +364,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     // in bootstrap (even with no MetricsStore → empty/`good`) so channels
     // always have it; the diagnosis loop is its only writer.
     private var diagnosisStore: DiagnosisStore?
+    // B1a (plan D-L4): parallel diagnosis-layer fan-out onto `/stream`. Created
+    // UNCONDITIONALLY alongside `diagnosisStore` and handed to the ChannelHost →
+    // SSEStream. `runDiagnosisCycle()` emits finding + verdict_changed events
+    // here (in ADDITION to the existing notify + store-update calls).
+    private var diagnosisBus: DiagnosisEventBus?
+    // B1a: last aggregate verdict LEVEL, so the cycle emits `verdict_changed`
+    // only on an actual level transition (good↔watch↔degraded↔problem). Seeded
+    // from any persisted-findings verdict at boot so a restart doesn't re-fire.
+    private var lastVerdictLevel: VerdictLevel = .good
     private var diagnosisTimer: Timer?
     // Q10 auto-actions.
     private var actionRegistry: ActionRegistry?
@@ -488,6 +497,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let diagnosisStore = DiagnosisStore()
         self.diagnosisStore = diagnosisStore
 
+        // B1a (plan D-L4): create the parallel diagnosis fan-out UNCONDITIONALLY
+        // too (like the store), so `/stream` can relay finding + verdict events
+        // whenever the diagnosis loop runs. Handed to the ChannelHost → SSEStream
+        // below; `runDiagnosisCycle()` is its only emitter.
+        let diagnosisBus = DiagnosisEventBus()
+        self.diagnosisBus = diagnosisBus
+
         // Build the engine ONLY when a MetricsStore exists (the detectors
         // read probe history). Without a store the whole layer stays dormant
         // — `runDiagnosisCycle()` guard-fails and no-ops, so a store-less
@@ -526,6 +542,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // immediately after restart reflects the still-active diagnosis
                 // (derive ONCE; UI + store get the same verdict).
                 await diagnosisStore.update(findings: persisted, verdict: seededVerdict)
+                // B1a: seed the last verdict level so the FIRST post-restart
+                // cycle only emits `verdict_changed` if the level ACTUALLY moves
+                // (a persisted diagnosis surviving relaunch is not a transition).
+                self.lastVerdictLevel = seededVerdict.level
             }
         }
 
@@ -698,7 +718,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // Phase 5: read-only diagnosis surface (/findings + /verdict +
                 // the MCP read tools). Always present (created unconditionally
                 // above); the diagnosis loop feeds it each cycle.
-                diagnosisStore: diagnosisStore
+                diagnosisStore: diagnosisStore,
+                // B1a (plan D-L4): parallel diagnosis fan-out onto /stream.
+                diagnosisBus: diagnosisBus
             )
             do {
                 try await host.start()
@@ -929,6 +951,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let verdict = Verdict.derive(from: findings)
         uiState.applyDiagnosis(verdict)
         await diagnosisStore?.update(findings: findings, verdict: verdict)
+
+        // B1a (plan D-L4): mirror the finding diff + verdict-level transition
+        // onto the parallel `/stream` fan-out — an ADDITION alongside the
+        // existing notify + store-update paths (which stay intact). Emitting a
+        // finding event onto the bus is a no-op when nothing subscribes.
+        if let diagBus = self.diagnosisBus {
+            for ev in events {
+                await diagBus.emit(.finding(ev))
+            }
+            // `verdict_changed` fires ONLY on an actual aggregate LEVEL move —
+            // an idempotent same-level cycle emits nothing.
+            if verdict.level != lastVerdictLevel {
+                await diagBus.emit(.verdictChanged(
+                    from: lastVerdictLevel,
+                    to: verdict.level,
+                    headline: verdict.headline
+                ))
+                lastVerdictLevel = verdict.level
+            }
+        }
+
         if let notifs = self.notifications {
             // Use the SAME notifications config the rest of bootstrap reads.
             // `bindings` is set early in bootstrap and never cleared, so the

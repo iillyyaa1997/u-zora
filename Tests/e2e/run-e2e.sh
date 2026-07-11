@@ -272,9 +272,10 @@ assert_jq   "initialize serverInfo.name"   "$MCP_INIT" '.result.serverInfo.name'
 MCP_TOOLS="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$BASE/mcp")"
 # 10 read tools (Q10 uzora_list_actions + Phase 5 list_findings/get_verdict +
-# B1a list_metrics/get_layout) + 2 write tools (write tools always listed;
-# allow_writes defaults true here).
-assert_jq   "tools/list has 12 tools"      "$MCP_TOOLS" '.result.tools | length' '12'
+# B1a list_metrics/get_layout) + 3 write tools (ack_alert / set_probe_config /
+# run_action [B2 Execute tier]; write tools always listed; allow_writes defaults
+# true here).
+assert_jq   "tools/list has 13 tools"      "$MCP_TOOLS" '.result.tools | length' '13'
 assert_contains "tools/list has uzora_status"     "$MCP_TOOLS" 'uzora_status'
 assert_contains "tools/list has uzora_list_alerts" "$MCP_TOOLS" 'uzora_list_alerts'
 assert_contains "tools/list has uzora_list_actions" "$MCP_TOOLS" 'uzora_list_actions'
@@ -284,6 +285,7 @@ assert_contains "tools/list has uzora_list_metrics" "$MCP_TOOLS" 'uzora_list_met
 assert_contains "tools/list has uzora_get_layout"  "$MCP_TOOLS" 'uzora_get_layout'
 assert_contains "tools/list has uzora_ack_alert"   "$MCP_TOOLS" 'uzora_ack_alert'
 assert_contains "tools/list has uzora_set_probe_config" "$MCP_TOOLS" 'uzora_set_probe_config'
+assert_contains "tools/list has uzora_run_action"  "$MCP_TOOLS" 'uzora_run_action'
 
 MCP_CALL="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"uzora_list_alerts","arguments":{}}}' "$BASE/mcp")"
@@ -449,6 +451,46 @@ assert_jq   "fan reconfigure updated=true"  "$FAN_W" '.updated' 'true'
 assert_jq   "fan threshold not persisted"   "$FAN_W" '.config.warn_threshold // "absent"' 'absent'
 assert_jq   "fan poll override applied"      "$FAN_W" '.config.poll_interval_sec' '42'
 assert_jq   "fan reconfigure has warning"    "$FAN_W" '.warnings | length >= 1' 'true'
+
+# ===========================================================================
+# B2 Execute tier — POST /actions/run. execute_enabled defaults FALSE in the
+# harness config, so the default posture is: an LLM (with the bearer) may
+# dry_run but a REAL run is refused (403) until the operator enables the tier.
+# We do NOT exercise the human-tap approval path here (headless, no click).
+# ===========================================================================
+section "B2 Execute tier — run-action (dry-run allowed; real run 403 when disabled)"
+# A dry_run PREVIEW is always allowed (non-mutating), even with the tier off.
+RUN_DRY="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"id":"brew_cleanup","dry_run":true}' "$BASE/actions/run")"
+assert_jq   "run dry_run returns status=dry"  "$RUN_DRY" '.status' 'dry'
+assert_jq   "run dry_run echoes action"       "$RUN_DRY" '.action' 'brew_cleanup'
+# A REAL run (dry_run:false) with the tier disabled (default) → 403 "execute…".
+RUN_REAL_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"id":"brew_cleanup","dry_run":false}' "$BASE/actions/run")"
+[ "$RUN_REAL_CODE" = "403" ] && pass "real run refused → 403 (execute disabled)" || fail "real run refused → 403 (execute disabled)" "got $RUN_REAL_CODE"
+RUN_REAL_BODY="$(curl -s --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"id":"brew_cleanup","dry_run":false}' "$BASE/actions/run")"
+assert_contains "real-run 403 body names the tier" "$RUN_REAL_BODY" 'execute'
+# A run WITHOUT the bearer is rejected 401 (write-tier auth, reuses B1b).
+RUN_NOAUTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -d '{"id":"brew_cleanup","dry_run":true}' "$BASE/actions/run")"
+[ "$RUN_NOAUTH_CODE" = "401" ] && pass "run without bearer → 401" || fail "run without bearer → 401" "got $RUN_NOAUTH_CODE"
+# Unknown action id → 404 (with a valid bearer + dry_run so auth/tier don't mask it).
+RUN_404_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"id":"does_not_exist","dry_run":true}' "$BASE/actions/run")"
+[ "$RUN_404_CODE" = "404" ] && pass "run unknown id → 404" || fail "run unknown id → 404" "got $RUN_404_CODE"
+
+section "MCP uzora_run_action — dry-run dispatch"
+MCP_RUN="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"uzora_run_action","arguments":{"id":"brew_cleanup","dry_run":true}}}' "$BASE/mcp")"
+assert_jq   "MCP run dry_run not error"       "$MCP_RUN" '.result.isError' 'false'
+assert_jq   "MCP run dry_run status=dry"      "$MCP_RUN" '.result.structuredContent.status' 'dry'
+# A real MCP run while the tier is disabled → isError (403 wrapped).
+MCP_RUN_REAL="$(curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"uzora_run_action","arguments":{"id":"brew_cleanup","dry_run":false}}}' "$BASE/mcp")"
+assert_jq   "MCP real run is error (disabled)" "$MCP_RUN_REAL" '.result.isError' 'true'
 
 section "Graceful shutdown"
 kill "$APP_PID" 2>/dev/null

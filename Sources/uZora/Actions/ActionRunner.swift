@@ -147,4 +147,12 @@ public actor ActionRunner {
     public func descriptors() async -> [ActionDescriptor] {
         await registry.allDescriptors()
     }
+
+    /// Descriptor for a single action id, or nil if unknown (pass-through to the
+    /// registry). Used by the B2 run funnel (`RESTHandlers.runAction`) to resolve
+    /// a requested id → 404 when unknown, and to read the display name for the
+    /// human-tap approval notification. Reuses the ONE registry — no new lookup.
+    public func descriptor(id: String) async -> ActionDescriptor? {
+        await registry.descriptor(id: id)
+    }
 }

@@ -53,10 +53,11 @@ public struct MCPTools: Sendable {
             return MCPTools.wrap(resp)
 
         case "uzora_list_actions":
-            // Read-only (Q8): available actions + their auto-enabled status +
-            // recent audit-log entries. The LLM can ADVISE ("disk full —
-            // there's a prune_apfs_snapshots action") but cannot execute;
-            // there is intentionally no uzora_run_action tool this iteration.
+            // Read-only: available actions + their auto-enabled status + recent
+            // audit-log entries. The LLM ADVISES here ("disk full — there's a
+            // prune_apfs_snapshots action") and REQUESTS a run via the separate
+            // Execute-tier `uzora_run_action` write tool (B2; off by default,
+            // bearer-required, human-tap-confirmed unless a capability token is set).
             let resp = await rest.actions()
             return MCPTools.wrap(resp)
 
@@ -149,6 +150,28 @@ public struct MCPTools: Sendable {
                 patch.pollIntervalSecRaw = MCPTools.number(args["poll_interval_sec"])
             }
             let resp = await rest.reconfigureProbe(name: probe, patch: patch, auth: auth)
+            return MCPTools.wrap(resp)
+
+        case "uzora_run_action":
+            // Write (B2 Execute tier): REQUEST a run of a reversible cleanup
+            // action by id. Same handler as `POST /actions/run`; it enforces the
+            // `allow_writes` gate (403), the B1b bearer + loopback gate (401/403,
+            // via `auth`), unknown-id (404), and the Execute-tier gate:
+            //   dry_run:true       → non-mutating preview (allowed even when the
+            //                        tier is disabled);
+            //   dry_run:false + tier OFF (default) → 403 "execute tier disabled";
+            //   dry_run:false + tier ON + valid capability_token → UNATTENDED run;
+            //   dry_run:false + tier ON + no/invalid token → 202 approval_requested
+            //                        (a macOS approval banner; runs on the human tap).
+            var id: String? = nil
+            var dryRun = false
+            var capToken = ""
+            if case .object(let args) = arguments {
+                if case .string(let s)? = args["id"] { id = s }
+                if case .bool(let b)? = args["dry_run"] { dryRun = b }
+                if case .string(let s)? = args["capability_token"] { capToken = s }
+            }
+            let resp = await rest.runAction(id: id ?? "", dryRun: dryRun, capabilityToken: capToken, auth: auth)
             return MCPTools.wrap(resp)
 
         case "uzora_subscribe":
@@ -346,9 +369,10 @@ public struct MCPTools: Sendable {
         ],
     ]
 
-    /// The two write tools. Listed regardless of `allowWrites` so clients see
-    /// a stable tool set and get a clear 403 isError when writes are off; the
-    /// description carries the disabled hint.
+    /// The three write tools (ack / set_probe_config / run_action). Listed
+    /// regardless of `allowWrites` so clients see a stable tool set and get a
+    /// clear 403 isError when writes are off; the description carries the
+    /// disabled hint.
     public static func writeSchemas(allowWrites: Bool) -> [[String: JSONValue]] {
         let gate = allowWrites
             ? ""
@@ -402,6 +426,29 @@ public struct MCPTools: Sendable {
                         ]),
                     ]),
                     "required": .array([.string("probe")]),
+                ]),
+            ],
+            [
+                "name": .string("uzora_run_action"),
+                "description": .string("Execute tier — REQUEST a run of one of uZora's reversible cleanup actions by id (get ids from uzora_list_actions). dry_run:true always returns a non-mutating PREVIEW (estimated freed bytes). A REAL run (dry_run:false) is OFF BY DEFAULT: it returns an 'execute tier disabled' error unless the operator has enabled the tier in Settings/config. When the tier is enabled, a real run WITHOUT a capability_token posts a macOS 'Approve run of X?' notification and returns {status:'approval_requested'} — it runs only when the human taps Approve; a request presenting the configured capability_token runs UNATTENDED. uZora never silently runs an action from the bridge unless the capability token matches." + bearer + gate),
+                "inputSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "id": .object([
+                            "type": .string("string"),
+                            "enum": .array(ActionsConfig.descriptors.map { .string($0.id) }),
+                            "description": .string("Action id to run (one of uZora's reversible cleanup actions; see uzora_list_actions)."),
+                        ]),
+                        "dry_run": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Preview only — estimate the effect without mutating anything. Always allowed, even when the Execute tier is disabled. Default false."),
+                        ]),
+                        "capability_token": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional unattended-run capability token (operator-set in config). When it matches, a real run executes immediately with no human tap; otherwise a real run posts an approval notification and waits for the tap."),
+                        ]),
+                    ]),
+                    "required": .array([.string("id")]),
                 ]),
             ],
         ]

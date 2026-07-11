@@ -116,10 +116,34 @@ public struct MCPConfig: Sendable, Codable, Equatable {
     /// live. When `false` they all return 403 / MCP isError. Lightweight
     /// precursor to real per-client auth.
     public var allowWrites: Bool
+    /// **Execute tier** master switch (Phase B2). OFF by default. Gates the
+    /// LLM-requested action-RUN surface (`uzora_run_action` / `POST /actions/run`):
+    /// when `false`, a REAL run (`dry_run == false`) is refused with 403 "execute
+    /// tier disabled" — the LLM can still `dry_run` (a non-mutating preview,
+    /// requires the bearer). When `true`, a real run WITHOUT a valid
+    /// `capabilityToken` posts a macOS "Approve run of X?" notification and only
+    /// executes on the human tap; a request presenting the matching
+    /// `capabilityToken` runs UNATTENDED. Independent of `allowWrites` (both must
+    /// permit a real run: a run is a write, so `allowWrites` gates it too).
+    public var executeEnabled: Bool
+    /// Optional capability token for UNATTENDED LLM-requested runs (Phase B2).
+    /// Empty (the default) ⇒ every real run needs a human approval tap. A
+    /// non-empty value lets an automation presenting it (constant-time match)
+    /// run without the tap. A SECRET — treated like a password. Read from config
+    /// ONLY: no bridge write path can set it (same invariant as B1b's bearer,
+    /// which lives in a separate 0600 sidecar; this one is opt-in + operator-set).
+    public var capabilityToken: String
 
-    public init(enabled: Bool = true, allowWrites: Bool = true) {
+    public init(
+        enabled: Bool = true,
+        allowWrites: Bool = true,
+        executeEnabled: Bool = false,
+        capabilityToken: String = ""
+    ) {
         self.enabled = enabled
         self.allowWrites = allowWrites
+        self.executeEnabled = executeEnabled
+        self.capabilityToken = capabilityToken
     }
 }
 
@@ -452,6 +476,8 @@ extension UZoraConfig {
             ("mcp", .table([
                 ("enabled", .bool(mcp.enabled)),
                 ("allow_writes", .bool(mcp.allowWrites)),
+                ("execute_enabled", .bool(mcp.executeEnabled)),
+                ("capability_token", .string(mcp.capabilityToken)),
             ])),
             ("notifications", .table([
                 ("banner_severity_floor", .string(notifications.bannerSeverityFloor.rawValue)),
@@ -524,6 +550,8 @@ extension UZoraConfig {
         if let m = toml.value(forKey: "mcp") {
             if let v = m.value(forKey: "enabled")?.asBool { c.mcp.enabled = v }
             if let v = m.value(forKey: "allow_writes")?.asBool { c.mcp.allowWrites = v }
+            if let v = m.value(forKey: "execute_enabled")?.asBool { c.mcp.executeEnabled = v }
+            if let v = m.value(forKey: "capability_token")?.asString { c.mcp.capabilityToken = v }
         }
 
         if let n = toml.value(forKey: "notifications") {

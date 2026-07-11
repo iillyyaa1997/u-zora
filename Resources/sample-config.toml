@@ -31,6 +31,21 @@ enabled = true
 # get a clear error instead of "unknown tool". This is a single on/off, not
 # per-client auth.
 allow_writes = true
+# Execute tier (B2) — let an LLM REQUEST an action RUN over the bridge
+#   (uzora_run_action / POST /actions/run). OFF BY DEFAULT.
+# When false, a request may only dry_run (a non-mutating PREVIEW, still needs
+# the bearer); a REAL run returns HTTP 403 "execute tier disabled".
+# When true, a REAL run WITHOUT a capability token posts a macOS "Approve run
+# of X?" notification and executes ONLY when you tap Approve; a request
+# presenting the capability_token below runs UNATTENDED (no tap). dry_run is
+# always allowed. This is a write, so allow_writes must also be true.
+execute_enabled = false
+# Optional capability token for UNATTENDED LLM-requested runs. Empty (default)
+# ⇒ every real run needs a human approval tap. Set a strong random string to
+# let an automation presenting it run without the tap. This is a SECRET — treat
+# it like a password. It is read from THIS config only; no bridge write can set
+# it.
+capability_token = ""
 
 [notifications]
 # Banner severity floor: "info", "warn", "critical".

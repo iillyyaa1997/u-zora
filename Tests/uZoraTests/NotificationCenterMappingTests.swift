@@ -100,6 +100,19 @@ struct NotificationCenterMappingTests {
         #expect(content.userInfo["severity"] as? String == "critical")
     }
 
+    /// B2: the LLM-requested run-approval banner names the action, uses the
+    /// approval category, and carries the SPECIFIC action id in userInfo so the
+    /// "Approve" tap runs THAT id via the confirmed path.
+    @Test @MainActor func makeApprovalContent_carriesActionID_andCategory() {
+        let content = UZoraNotificationCenter.makeApprovalContent(
+            actionID: "prune_apfs_snapshots",
+            actionName: "Prune local APFS snapshots"
+        )
+        #expect(content.title.contains("Prune local APFS snapshots"))
+        #expect(content.categoryIdentifier == UZoraNotificationCenter.approvalCategoryID)
+        #expect(content.userInfo[UZoraNotificationCenter.approvalActionIDKey] as? String == "prune_apfs_snapshots")
+    }
+
     /// Table-test that mirrors the README documentation: each probe maps to
     /// a single, deterministic action button label.
     @Test @MainActor func actionMap_completeProbeCoverage() {

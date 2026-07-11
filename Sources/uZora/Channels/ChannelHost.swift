@@ -47,7 +47,10 @@ public actor ChannelHost {
         actionRunner: ActionRunner? = nil,
         diagnosisStore: DiagnosisStore? = nil,
         diagnosisBus: DiagnosisEventBus? = nil,
-        bridgeAuth: BridgeAuth? = nil
+        bridgeAuth: BridgeAuth? = nil,
+        executeEnabled: Bool = false,
+        capabilityToken: String = "",
+        approvalRequester: (@Sendable (_ actionID: String, _ actionName: String) async -> Void)? = nil
     ) {
         self.port = port
         self.state = state
@@ -70,7 +73,13 @@ public actor ChannelHost {
             // REST routes call `rest.dispatch(req)` and the MCP routes call
             // `mcp.handle(req)`, both of which already carry the request headers
             // → the bearer + Origin/Host checks run on every write.
-            bridgeAuth: bridgeAuth
+            bridgeAuth: bridgeAuth,
+            // B2 Execute tier: the master switch + optional unattended capability
+            // token (both from [mcp] config), plus the human-tap approval poster
+            // (wired to the notification center by uZoraApp).
+            executeEnabled: executeEnabled,
+            capabilityToken: capabilityToken,
+            approvalRequester: approvalRequester
         )
         self.rest = rest
         self.sse = SSEStream(eventBus: eventBus, diagnosisBus: diagnosisBus)
@@ -180,6 +189,12 @@ public actor ChannelHost {
             await rest.dispatch(req)
         }
         await httpServer.register(method: "POST", path: "/config/probe") { req in
+            await rest.dispatch(req)
+        }
+        // B2 Execute tier: request an action run ({id, dry_run?, capability_token?}).
+        // Goes through `rest.dispatch` so REST + MCP share the one run funnel +
+        // the same allow_writes / bearer / execute-tier gates.
+        await httpServer.register(method: "POST", path: "/actions/run") { req in
             await rest.dispatch(req)
         }
         await httpServer.registerStreaming(method: "GET", path: "/stream") { req, sink in

@@ -46,6 +46,23 @@ public struct RESTHandlers: Sendable {
     /// (`ChannelHost` ← `uZoraApp`) ALWAYS wires a `BridgeAuth`, so real writes
     /// are always gated.
     public let bridgeAuth: BridgeAuth?
+    /// B2 Execute tier master switch (from `MCPConfig.executeEnabled`). When
+    /// `false` (the default) a REAL LLM-requested run (`dry_run == false`) is
+    /// refused 403; a `dry_run` preview is still allowed. Independent of
+    /// `allowWrites` (both gate a real run).
+    public let executeEnabled: Bool
+    /// B2 optional capability token (from `MCPConfig.capabilityToken`). When
+    /// non-empty AND a request presents a constant-time match, an LLM-requested
+    /// real run executes UNATTENDED; otherwise a real run falls to the human-tap
+    /// approval gate. Config-only — never settable via a bridge write.
+    public let capabilityToken: String
+    /// B2 human-tap approval poster. Called by `runAction` when a real run needs
+    /// operator confirmation: posts a macOS "Approve run of X?" notification
+    /// carrying the action id (the tap runs THAT id via the existing `.confirmed`
+    /// path). Optional + defaulted `nil` so unit harnesses (and headless runs)
+    /// build without a notification center — the funnel still returns
+    /// `approval_requested` (202) but no banner is posted. Wired by `uZoraApp`.
+    public let approvalRequester: (@Sendable (_ actionID: String, _ actionName: String) async -> Void)?
     private let encoder: JSONEncoder
     private let log = Logger(subsystem: "place.unicorns.uzora", category: "rest")
 
@@ -56,7 +73,10 @@ public struct RESTHandlers: Sendable {
         allowWrites: Bool = true,
         actionRunner: ActionRunner? = nil,
         diagnosisStore: DiagnosisStore? = nil,
-        bridgeAuth: BridgeAuth? = nil
+        bridgeAuth: BridgeAuth? = nil,
+        executeEnabled: Bool = false,
+        capabilityToken: String = "",
+        approvalRequester: (@Sendable (_ actionID: String, _ actionName: String) async -> Void)? = nil
     ) {
         self.state = state
         self.metricsStore = metricsStore
@@ -65,6 +85,9 @@ public struct RESTHandlers: Sendable {
         self.actionRunner = actionRunner
         self.diagnosisStore = diagnosisStore
         self.bridgeAuth = bridgeAuth
+        self.executeEnabled = executeEnabled
+        self.capabilityToken = capabilityToken
+        self.approvalRequester = approvalRequester
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
@@ -582,6 +605,166 @@ public struct RESTHandlers: Sendable {
         ), status: 200)
     }
 
+    // MARK: - POST /actions/run  (B2 — Execute tier, LLM-requested run)
+
+    /// Response for `POST /actions/run` + `uzora_run_action`. One shape covers
+    /// all outcomes; `status` disambiguates:
+    ///  - `"dry"`                — a non-mutating preview ran (`dry_run:true`).
+    ///  - `"ran"`                — a real (confirmed) run executed; `skipped`
+    ///                             true means it found nothing to do.
+    ///  - `"denied"`             — PolicyEngine refused the run (e.g. not
+    ///                             reversible); `policy_decision` carries the reason.
+    ///  - `"approval_requested"` — a macOS approval notification was posted; the
+    ///                             run happens later, out of band, on the human tap.
+    /// snake_case encoder emits `policy_decision` / `freed_bytes`.
+    public struct RunActionResponse: Codable, Sendable {
+        public let status: String
+        public let action: String
+        /// The ActionTrigger used (`"confirmed"` / `"dry_run"`); nil for
+        /// `approval_requested` (nothing ran yet).
+        public let trigger: String?
+        /// The PolicyEngine audit string (`"allow"` / `"dry_run"` /
+        /// `"deny:<reason>"`); nil for `approval_requested`.
+        public let policyDecision: String?
+        /// Bytes freed (real run) or estimated (dry-run preview shell). nil for
+        /// `approval_requested` / `denied`.
+        public let freedBytes: UInt64?
+        /// Whether the action found nothing to do. nil when not applicable.
+        public let skipped: Bool?
+        public let error: String?
+        public let note: String?
+
+        public init(
+            status: String,
+            action: String,
+            trigger: String? = nil,
+            policyDecision: String? = nil,
+            freedBytes: UInt64? = nil,
+            skipped: Bool? = nil,
+            error: String? = nil,
+            note: String? = nil
+        ) {
+            self.status = status
+            self.action = action
+            self.trigger = trigger
+            self.policyDecision = policyDecision
+            self.freedBytes = freedBytes
+            self.skipped = skipped
+            self.error = error
+            self.note = note
+        }
+    }
+
+    /// The ONE run funnel for the Execute tier (B2). Both `uzora_run_action`
+    /// (MCP) and `POST /actions/run` (REST) route here. Reuses the single
+    /// `ActionRunner` + `PolicyEngine` + `AuditLog` (no new run/gate logic) and
+    /// the existing notification `.confirmed` path for human-approved runs.
+    ///
+    /// Decision order (each step short-circuits):
+    ///  1. `allowWrites` master OFF ⇒ **403** (a run is a write).
+    ///  2. `authorizeWrite(auth)` ⇒ **403** cross-origin/non-loopback, then
+    ///     **401** missing/invalid bearer (B1b — identical to the other writes).
+    ///  3. actions subsystem not wired ⇒ **500** (headless; production always wires it).
+    ///  4. unknown action id ⇒ **404**.
+    ///  5. `dry_run == true` ⇒ `ActionRunner.run(trigger:.dryRun)` → **200** preview.
+    ///     Allowed even when `executeEnabled == false` (a preview mutates nothing).
+    ///  6. `dry_run == false`:
+    ///       a. `executeEnabled == false` ⇒ **403** "execute tier disabled".
+    ///       b. valid `capabilityToken` (non-empty config token, constant-time
+    ///          match) ⇒ UNATTENDED `run(trigger:.confirmed)` → **200** outcome.
+    ///       c. else ⇒ post the human-tap approval notification (carrying the id)
+    ///          + return **202** `{status:"approval_requested", action:id}`. The
+    ///          run happens later, on the tap, via the existing `.confirmed` path.
+    public func runAction(
+        id: String,
+        dryRun: Bool,
+        capabilityToken presented: String,
+        auth: WriteAuthContext = WriteAuthContext()
+    ) async -> HTTPResponse {
+        // 1 + 2: same write gate as every other mutation (a run is a write).
+        guard allowWrites else { return Self.writesDisabledResponse() }
+        if let denial = authorizeWrite(auth) { return denial }
+
+        // 3: no runner ⇒ nothing to run (headless). Production always wires one.
+        guard let runner = actionRunner else {
+            return encode(ErrorBody(error: "actions subsystem not wired (running headless?)"), status: 500)
+        }
+
+        // 4: unknown id ⇒ 404 (resolve via the registry through the runner).
+        guard let descriptor = await runner.descriptor(id: id) else {
+            return encode(ErrorBody(error: "no such action '\(id)'"), status: 404)
+        }
+
+        // 5: dry-run preview — always allowed (no mutation), even with the
+        //    Execute tier disabled. Reuses the runner's `.dryRun` path.
+        if dryRun {
+            let outcome = await runner.run(actionID: id, trigger: .dryRun)
+            return encode(Self.response(for: outcome), status: 200)
+        }
+
+        // 6a: real run but the Execute tier is off (the default posture).
+        guard executeEnabled else {
+            return encode(ErrorBody(error: "execute tier disabled (set [mcp] execute_enabled = true)"), status: 403)
+        }
+
+        // 6b: unattended run iff a capability token is configured AND the request
+        //     presents a constant-time match. An empty config token (the default)
+        //     or a non-matching presented token falls through to the human gate.
+        if !capabilityToken.isEmpty, !presented.isEmpty,
+           BridgeAuth.constantTimeEquals(presented, capabilityToken) {
+            let outcome = await runner.run(actionID: id, trigger: .confirmed)
+            log.info("action \(id, privacy: .public) ran UNATTENDED via capability token (bridge B2)")
+            return encode(Self.response(for: outcome), status: 200)
+        }
+
+        // 6c: human-tap gate — post the approval banner (the tap runs THAT id via
+        //     the existing `.confirmed` path) and return 202. Nothing runs inline.
+        await approvalRequester?(id, descriptor.name)
+        log.info("action \(id, privacy: .public) approval requested via LLM bridge (B2 human-tap gate)")
+        return encode(
+            RunActionResponse(
+                status: "approval_requested",
+                action: id,
+                note: "posted a macOS approval notification; the run happens when you tap Approve"
+            ),
+            status: 202
+        )
+    }
+
+    /// Project a runner `RunOutcome` into the wire response (dry / ran / denied).
+    static func response(for outcome: ActionRunner.RunOutcome) -> RunActionResponse {
+        switch outcome.decision {
+        case .dryRun:
+            return RunActionResponse(
+                status: "dry",
+                action: outcome.actionID,
+                trigger: ActionTrigger.dryRun.rawValue,
+                policyDecision: outcome.decision.auditString,
+                freedBytes: outcome.result?.freedBytes,
+                skipped: outcome.result?.skipped,
+                error: outcome.result?.error
+            )
+        case .allow:
+            return RunActionResponse(
+                status: "ran",
+                action: outcome.actionID,
+                trigger: ActionTrigger.confirmed.rawValue,
+                policyDecision: outcome.decision.auditString,
+                freedBytes: outcome.result?.freedBytes,
+                skipped: outcome.result?.skipped,
+                error: outcome.result?.error
+            )
+        case .deny:
+            return RunActionResponse(
+                status: "denied",
+                action: outcome.actionID,
+                trigger: ActionTrigger.confirmed.rawValue,
+                policyDecision: outcome.decision.auditString,
+                note: "policy denied the run"
+            )
+        }
+    }
+
     // MARK: - GET /findings  (Phase 5 — proactive-diagnosis surface, plan D6)
 
     /// Response for `GET /findings`: the proactive-diagnosis findings (each a
@@ -794,6 +977,21 @@ public struct RESTHandlers: Sendable {
             let name = Self.stringValue(fields["probe"])
             let patch = Self.parsePatch(from: fields)
             return await reconfigureProbe(name: name, patch: patch, auth: auth)
+        case ("POST", "/actions/run"):
+            // B2 Execute tier: request a run of an action by id. Body:
+            // {id, dry_run?, capability_token?}. Same write-auth material (bearer
+            // + Origin/Host) as the other writes, threaded via `auth`.
+            let auth = WriteAuthContext(headers: request.headers)
+            let body = (try? JSONValue.decode(request.body)) ?? .null
+            guard case .object(let fields) = body else {
+                return encode(ErrorBody(error: "run requires a JSON object body ({\"id\":\"prune_apfs_snapshots\", \"dry_run\":true})"), status: 400)
+            }
+            guard let id = Self.stringValue(fields["id"]), !id.isEmpty else {
+                return encode(ErrorBody(error: "run requires a non-empty action 'id'"), status: 400)
+            }
+            let dryRun: Bool = { if case .bool(let b)? = fields["dry_run"] { return b } ; return false }()
+            let capToken = Self.stringValue(fields["capability_token"]) ?? ""
+            return await runAction(id: id, dryRun: dryRun, capabilityToken: capToken, auth: auth)
         default:
             return HTTPResponse.notFound("no REST route for \(request.method) \(request.path)")
         }

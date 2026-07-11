@@ -36,10 +36,19 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
     /// `trigger: .confirmed`. Wired by `uZoraApp.bootstrap`.
     public typealias RunActionHandler = @Sendable (_ probe: String, _ severity: Severity) async -> Void
 
+    /// B2: handler invoked when the user taps "Approve" on an LLM-requested
+    /// run-approval notification. Receives the SPECIFIC action id the LLM asked
+    /// for; runs THAT id via the `ActionRunner` with `trigger: .confirmed` (the
+    /// same explicit-confirmation path as the alert "Run cleanup" button). Wired
+    /// by `uZoraApp.bootstrap` next to `wireRunAction`.
+    public typealias RunActionByIDHandler = @Sendable (_ actionID: String) async -> Void
+
     private let center: UNUserNotificationCenter
     private var categoriesInstalled: Bool = false
     /// Q10: closure that runs the confirmed action(s) for a probe/severity.
     private var runActionHandler: RunActionHandler?
+    /// B2: closure that runs one confirmed action by id (LLM-requested approval).
+    private var runActionByIDHandler: RunActionByIDHandler?
     /// Q10: probes that currently have at least one mapped action — only
     /// these categories carry a "Run" button. Populated from the
     /// ActionRegistry mapping at wire time (MVP: just "disk").
@@ -63,6 +72,16 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
         installCategories()
     }
 
+    /// B2: wire the LLM-requested run-approval path — the closure that runs one
+    /// action by id when the user taps "Approve" on an approval notification.
+    /// Re-installs categories so the approval category/button is registered.
+    /// Idempotent-safe; independent of `wireRunAction`.
+    public func wireRunActionByID(handler: @escaping RunActionByIDHandler) {
+        self.runActionByIDHandler = handler
+        self.categoriesInstalled = false
+        installCategories()
+    }
+
     /// Request authorization (banner, sound, alert). Idempotent — the
     /// system caches the user's first answer; this call returns immediately
     /// on subsequent launches.
@@ -80,6 +99,15 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
     /// per-probe id is `uzora.act.run.<probe>` so the delegate can tell a
     /// "Run cleanup" tap from the legacy "open a tool" tap.
     public static let runActionIDPrefix = "uzora.act.run."
+
+    /// B2: dedicated category + button id for an LLM-requested run-approval
+    /// notification. The category carries a single "Approve" button; the tap
+    /// reads the requested action id from `userInfo["approve_action_id"]` and
+    /// runs THAT id via `runActionByIDHandler` (trigger `.confirmed`).
+    public static let approvalCategoryID = "uzora.cat.approve"
+    public static let approvalActionID = "uzora.act.approve.run"
+    /// `userInfo` key carrying the specific action id an approval banner is for.
+    public static let approvalActionIDKey = "approve_action_id"
 
     /// Build categories for each probe. Each carries the legacy "open a
     /// tool" action; probes with at least one mapped Q10 action ALSO carry a
@@ -119,7 +147,24 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
                 )
             }
         )
-        center.setNotificationCategories(categories)
+        // B2: the LLM-requested run-approval category — a single "Approve run"
+        // button (NOT foreground; approving shouldn't yank the user into the
+        // app). Always installed; the tap only does anything once
+        // `runActionByIDHandler` is wired.
+        let approveTitle = String(localized: "Approve run", defaultValue: "Approve run")
+        let approvalCategory = UNNotificationCategory(
+            identifier: Self.approvalCategoryID,
+            actions: [
+                UNNotificationAction(
+                    identifier: Self.approvalActionID,
+                    title: approveTitle,
+                    options: []
+                )
+            ],
+            intentIdentifiers: [],
+            options: []
+        )
+        center.setNotificationCategories(categories.union([approvalCategory]))
     }
 
     /// Build a `UNNotificationRequest` for an event and submit it.
@@ -150,6 +195,56 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
         } catch {
             log.error("UN add() failed for \(alertID, privacy: .public): \(String(describing: error), privacy: .public)")
         }
+        return content
+    }
+
+    /// B2 — post an LLM-requested run-approval banner for a SPECIFIC action id.
+    /// The banner carries the id in `userInfo` and offers a single "Approve"
+    /// button; tapping it runs THAT id via `runActionByIDHandler`
+    /// (`trigger: .confirmed`). The run happens ONLY on the tap — this method
+    /// just posts the request. Returns the content (test affordance; `add` is
+    /// best-effort). Called from `RESTHandlers.runAction`'s human-tap gate.
+    @discardableResult
+    public func requestRunApproval(actionID: String, actionName: String) async -> UNMutableNotificationContent? {
+        installCategories()
+        let content = Self.makeApprovalContent(actionID: actionID, actionName: actionName)
+        let req = UNNotificationRequest(
+            identifier: "uzora.approve.\(actionID)",
+            content: content,
+            trigger: nil    // deliver immediately
+        )
+        do {
+            try await center.add(req)
+        } catch {
+            log.error("UN add() failed for run-approval \(actionID, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+        return content
+    }
+
+    /// Void-returning wrapper over `requestRunApproval` for the bridge's
+    /// `approvalRequester` closure. The closure is `@Sendable` and crosses the
+    /// actor boundary; the non-Sendable `UNMutableNotificationContent?` result
+    /// must NOT ride back out, so this discards it here on the MainActor.
+    public func postRunApproval(actionID: String, actionName: String) async {
+        _ = await requestRunApproval(actionID: actionID, actionName: actionName)
+    }
+
+    /// Pure content builder for a B2 run-approval banner. Exposed (static) so
+    /// tests validate the shape without a live UNUserNotificationCenter (mirrors
+    /// `makeContent` / `makeFindingContent`).
+    static func makeApprovalContent(actionID: String, actionName: String) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = "Approve run of \(actionName)?"
+        content.body = String(
+            localized: "Requested via the LLM bridge. Tap Approve to run.",
+            defaultValue: "Requested via the LLM bridge. Tap Approve to run."
+        )
+        content.interruptionLevel = .active
+        content.sound = .default
+        content.categoryIdentifier = approvalCategoryID
+        content.userInfo = [
+            approvalActionIDKey: actionID,
+        ]
         return content
     }
 
@@ -337,6 +432,18 @@ public final class UZoraNotificationCenter: NSObject, @preconcurrency UNUserNoti
     ) {
         let userInfo = response.notification.request.content.userInfo
         let actionID = response.actionIdentifier
+
+        // B2: an "Approve run" tap on an LLM-requested approval banner runs the
+        // SPECIFIC action id carried in userInfo, via the confirmed run path.
+        if actionID == Self.approvalActionID,
+           let handler = runActionByIDHandler,
+           let requestedID = userInfo[Self.approvalActionIDKey] as? String {
+            Task {
+                await handler(requestedID)
+                completionHandler()
+            }
+            return
+        }
 
         if actionID.hasPrefix(Self.runActionIDPrefix), let handler = runActionHandler {
             let probe = (userInfo["probe"] as? String)

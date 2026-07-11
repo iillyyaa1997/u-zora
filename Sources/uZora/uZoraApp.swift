@@ -628,6 +628,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                     _ = await runner.run(actionID: action.descriptor.id, trigger: .confirmed)
                 }
             }
+
+            // B2 Execute tier: the LLM-requested run-approval path. A tap on the
+            // "Approve run of X?" banner runs THAT specific action id through the
+            // SAME confirmed path (PolicyEngine bypasses the behavioural gates for
+            // a confirmed run but still enforces reversibility + audits).
+            notifs.wireRunActionByID { [weak self] actionID in
+                guard let runner = await self?.actionRunner else { return }
+                _ = await runner.run(actionID: actionID, trigger: .confirmed)
+            }
         }
 
         // Seed the probe inventory in the state store, reflecting each
@@ -704,6 +713,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // failure still yields an in-memory token (writes fail closed).
         let bridgeAuth = BridgeAuth.loadOrCreate()
 
+        // B2 Execute tier: the human-tap approval poster handed to the bridge.
+        // When an LLM-requested real run needs confirmation, `RESTHandlers` calls
+        // this → the notification center posts an "Approve run of X?" banner whose
+        // tap runs THAT id via the confirmed path (wired above). `notifs` is a
+        // @MainActor class (implicitly Sendable); the closure awaits into it.
+        let notifsForApproval = notifs
+        let approvalRequester: @Sendable (String, String) async -> Void = { actionID, actionName in
+            await notifsForApproval.postRunApproval(actionID: actionID, actionName: actionName)
+        }
+
         // Bring up the four-channel bridge respecting HTTP/MCP enablement.
         let portConfig = initial.http.port
         let portEnv = ProcessInfo.processInfo.environment["UZORA_HTTP_PORT"].flatMap { UInt16($0) }
@@ -730,7 +749,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 // B1a (plan D-L4): parallel diagnosis fan-out onto /stream.
                 diagnosisBus: diagnosisBus,
                 // B1b: bearer-token gate for the write tier.
-                bridgeAuth: bridgeAuth
+                bridgeAuth: bridgeAuth,
+                // B2 Execute tier: master switch + optional unattended capability
+                // token (both from [mcp] config), plus the human-tap approval poster.
+                executeEnabled: initial.mcp.executeEnabled,
+                capabilityToken: initial.mcp.capabilityToken,
+                approvalRequester: approvalRequester
             )
             do {
                 try await host.start()

@@ -31,6 +31,14 @@ protocol PopoverDataSource: ObservableObject {
     // "Other signals"; `AttentionBlock` consumes `findings` + `activeAlerts`).
     var activeAlerts: [Alert] { get }
 
+    // A4c inline quick-actions (plan D-C2): the runnable actions PRE-RESOLVED
+    // per probe at the data layer (keyed by probe name, e.g. `"disk"`), so a
+    // finding card can ask SYNCHRONOUSLY "does my probe have a runnable action?"
+    // without hopping the `ActionRegistry` actor. Populated from the active
+    // alerts' probes via `ActionRegistry.descriptorsFor`. Empty for a source
+    // (demo/preview) that has none.
+    var availableActionsByProbe: [String: [ActionDescriptor]] { get }
+
     // System overview tiles.
     var cpuTempLabel: String { get }
     var diskFreeLabel: String { get }

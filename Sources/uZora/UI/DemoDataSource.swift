@@ -37,6 +37,14 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     // Attention zone.
     @Published var activeAlerts: [Alert] = []
 
+    // A4c inline quick-actions: a plausible pre-resolved map so the Layout-tab
+    // demo preview shows the finding-card "Fix" button (the demo's `degraded`
+    // phase emits a disk finding, whose derived probe is `disk`). The demo
+    // handlers stay no-ops — the preview never runs a real action.
+    @Published var availableActionsByProbe: [String: [ActionDescriptor]] = [
+        "disk": ActionRegistry.Descriptors.all,
+    ]
+
     // System overview tiles.
     @Published var cpuTempLabel: String = "—"
     @Published var diskFreeLabel: String = "—"

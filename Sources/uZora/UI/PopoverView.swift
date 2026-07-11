@@ -47,6 +47,21 @@ struct PopoverView<Source: PopoverDataSource>: View {
     /// preview can hand it an arbitrary layout without a live config.
     let layout: PopoverLayout
 
+    /// A4c inline quick-actions (plan D-C2 + D-L2). Two async handlers threaded
+    /// down into the Attention zone. They are NOT on the read-only
+    /// `PopoverDataSource` protocol — they are view params with NO-OP defaults,
+    /// so the demo/preview call sites (which must never mutate the system) keep
+    /// compiling unchanged. `PopoverGate` alone wires the REAL closures
+    /// (capturing the live `ActionRunner` / `StateStore`).
+    ///
+    /// `onRunAction(actionID)` runs a resolved finding action with the
+    /// `.confirmed` trigger — a direct UI tap IS the confirmation (D-L2), so it
+    /// runs immediately (PolicyEngine bypasses the behavioural gates but still
+    /// enforces reversibility + audits). `onAck(alertID)` acknowledges
+    /// (suppresses) an "Other signals" alert: UI-state only, never the OS.
+    var onRunAction: @Sendable (String) async -> Void = { _ in }
+    var onAck: @Sendable (Alert.ID) async -> Void = { _ in }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             PopoverHeader(
@@ -99,7 +114,10 @@ struct PopoverView<Source: PopoverDataSource>: View {
         case .attention:
             AttentionBlock(
                 findings: state.findings,
-                alerts: state.activeAlerts
+                alerts: state.activeAlerts,
+                availableActionsByProbe: state.availableActionsByProbe,
+                onRunAction: onRunAction,
+                onAck: onAck
             )
         case .systemOverview:
             SystemOverviewBlock(
@@ -260,6 +278,13 @@ private struct VerdictCard: View {
 private struct AttentionBlock: View {
     let findings: [Finding]
     let alerts: [Alert]
+    /// A4c: the pre-resolved runnable actions per probe (from the data layer,
+    /// `state.availableActionsByProbe`). A finding card shows a "Fix" button
+    /// only when its resolved probe has ≥1 entry here — so no async work runs
+    /// in the view.
+    let availableActionsByProbe: [String: [ActionDescriptor]]
+    let onRunAction: @Sendable (String) async -> Void
+    let onAck: @Sendable (Alert.ID) async -> Void
 
     var body: some View {
         if attentionZoneIsVisible(findings: findings, alerts: alerts) {
@@ -283,7 +308,11 @@ private struct AttentionBlock: View {
         if !findings.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(findings, id: \.id) { finding in
-                    FindingDetailRow(finding: finding)
+                    FindingDetailRow(
+                        finding: finding,
+                        actions: availableActions(for: finding, in: availableActionsByProbe),
+                        onRunAction: onRunAction
+                    )
                 }
             }
         }
@@ -299,7 +328,7 @@ private struct AttentionBlock: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
                 ForEach(others, id: \.id) { alert in
-                    AlertRow(alert: alert)
+                    AlertRow(alert: alert, onAck: onAck)
                 }
             }
         }
@@ -336,6 +365,55 @@ func unexplainedAlerts(_ alerts: [Alert], findings: [Finding]) -> [Alert] {
         let isExplained = explained.contains(probe) || explained.contains(key)
         return !isExplained
     }
+}
+
+// MARK: - A4c finding → probe → action resolution (pure)
+
+/// The probe a finding's remediation actions bind to (plan D-C2).
+///
+/// A `Finding` carries NO probe of its own — only a free-text `detector` id
+/// and a `subject`. Actions instead bind to a probe via
+/// `ActionDescriptor.relatedProbe` (today only `"disk"`). We bridge the two by
+/// deriving a probe token from the detector id: its leading segment before the
+/// first `_`. So the disk detector (`disk_hard_critical`) AND the demo's
+/// `disk_hard` both map to `disk`; `memory_pressure` → `memory`;
+/// `runaway_daemon` → `runaway`. Only `disk` currently has bound actions, so a
+/// disk finding resolves to the disk actions while a memory/runaway finding
+/// resolves to none (no "Fix" button). NEVER derived from the finding's
+/// free-text `suggestedAction`.
+func findingActionProbe(_ finding: Finding) -> String {
+    let detector = finding.detector.trimmingCharacters(in: .whitespaces)
+    if let underscore = detector.firstIndex(of: "_") {
+        return String(detector[..<underscore])
+    }
+    return detector
+}
+
+/// The runnable actions for a finding, looked up SYNCHRONOUSLY in the
+/// pre-resolved `availableActionsByProbe` map (computed off-actor at the data
+/// layer). Empty ⇒ the finding has no concrete runnable action ⇒ no "Fix"
+/// button. Pure + testable.
+func availableActions(
+    for finding: Finding,
+    in availableActionsByProbe: [String: [ActionDescriptor]]
+) -> [ActionDescriptor] {
+    availableActionsByProbe[findingActionProbe(finding)] ?? []
+}
+
+/// Group active alerts by probe, keeping the MAX severity seen per probe — the
+/// eligibility floor the data layer feeds to `ActionRegistry.descriptorsFor`
+/// when building `availableActionsByProbe`. Pure so the data-plumbing is
+/// testable without the registry actor.
+func probeSeverityFloors(_ alerts: [Alert]) -> [String: Severity] {
+    var out: [String: Severity] = [:]
+    for alert in alerts {
+        if let existing = out[alert.probe] {
+            if alert.severity > existing { out[alert.probe] = alert.severity }
+        } else {
+            out[alert.probe] = alert.severity
+        }
+    }
+    return out
 }
 
 /// System overview: a 2-column grid of the layout's ENABLED tiles, in the
@@ -647,6 +725,10 @@ func popoverNetRateString(inPerSec: UInt64, outPerSec: UInt64) -> String {
 /// suggested action. Body is intentionally small (cross-SDK view type-check).
 private struct FindingDetailRow: View {
     let finding: Finding
+    /// A4c: the runnable actions resolved for this finding's probe (may be
+    /// empty). When non-empty a "Fix" button runs the first/primary one.
+    let actions: [ActionDescriptor]
+    let onRunAction: @Sendable (String) async -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -658,6 +740,7 @@ private struct FindingDetailRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
             actionLine
+            fixButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(6)
@@ -680,10 +763,78 @@ private struct FindingDetailRow: View {
             .padding(.top, 1)
         }
     }
+
+    /// A4c "Fix" (run-action) button — shown ONLY when the finding's probe
+    /// resolved to ≥1 runnable action. Runs the PRIMARY (first) action; a
+    /// `caution` action confirms first (handled inside `FindingFixButton`).
+    @ViewBuilder
+    private var fixButton: some View {
+        if let primary = actions.first {
+            FindingFixButton(action: primary, onRunAction: onRunAction)
+                .padding(.top, 3)
+        }
+    }
+}
+
+/// A4c — the finding-card "Fix" button, factored into its own tiny struct so
+/// the finding row body stays inside the cross-SDK view type-checker budget
+/// (a button + a confirmation dialog on the same card is the biggest risk).
+///
+/// A non-`caution` action runs on tap (the tap IS the confirmation, D-L2). A
+/// `caution` action (e.g. clear-user-caches) surfaces a lightweight
+/// `.confirmationDialog` first. Either way the run goes through the injected
+/// `onRunAction` closure → `ActionRunner.run(actionID:, trigger:.confirmed)`.
+private struct FindingFixButton: View {
+    let action: ActionDescriptor
+    let onRunAction: @Sendable (String) async -> Void
+    @State private var confirming = false
+
+    var body: some View {
+        Button {
+            if action.caution {
+                confirming = true
+            } else {
+                run()
+            }
+        } label: {
+            Label(String(localized: "Fix", defaultValue: "Fix"), systemImage: "bolt.fill")
+                .font(.caption2)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .confirmationDialog(
+            // The key must be a StaticString, so the dynamic action name lives
+            // only in the interpolated `defaultValue`.
+            Text(String(localized: "action.fix.confirm.title", defaultValue: "Run \(action.name)?")),
+            isPresented: $confirming,
+            titleVisibility: .visible
+        ) {
+            Button(role: .destructive) {
+                run()
+            } label: {
+                Text(String(localized: "Run", defaultValue: "Run"))
+            }
+            Button(role: .cancel) { } label: {
+                Text(String(localized: "Cancel", defaultValue: "Cancel"))
+            }
+        } message: {
+            Text(action.detail)
+        }
+    }
+
+    /// Fire-and-forget the confirmed run. Bind locals (no `self` capture) so the
+    /// `@Sendable` closure + the `Sendable` id cross into the `Task` cleanly.
+    private func run() {
+        let handler = onRunAction
+        let id = action.id
+        Task { await handler(id) }
+    }
 }
 
 private struct AlertRow: View {
     let alert: Alert
+    /// A4c: acknowledge (suppress) this alert — UI-state only, no confirm.
+    let onAck: @Sendable (Alert.ID) async -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -692,7 +843,7 @@ private struct AlertRow: View {
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
+                HStack(spacing: 6) {
                     Text("\(alert.probe):\(alert.key)")
                         .font(.caption)
                         .fontWeight(.medium)
@@ -700,6 +851,7 @@ private struct AlertRow: View {
                     Text(relativeTime)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    AlertAckButton(alertID: alert.id, onAck: onAck)
                 }
                 Text(alert.message)
                     .font(.caption2)
@@ -735,6 +887,29 @@ private struct AlertRow: View {
         if minutes < 60 { return "\(minutes)m ago" }
         let hours = minutes / 60
         return "\(hours)h ago"
+    }
+}
+
+/// A4c — the per-alert "Ack" button on an "Other signals" row. A single tap
+/// acknowledges (suppresses) the alert via the injected `onAck` closure →
+/// `StateStore.acknowledgeResult`. Non-destructive (UI-state only, never the
+/// OS) so there is NO confirmation. Factored into its own tiny struct to keep
+/// `AlertRow`'s body small (cross-SDK view type-check).
+private struct AlertAckButton: View {
+    let alertID: Alert.ID
+    let onAck: @Sendable (Alert.ID) async -> Void
+
+    var body: some View {
+        Button {
+            let handler = onAck
+            let id = alertID
+            Task { await handler(id) }
+        } label: {
+            Image(systemName: "checkmark.circle")
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .help(Text(String(localized: "Acknowledge", defaultValue: "Acknowledge")))
     }
 }
 

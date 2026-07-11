@@ -56,7 +56,17 @@ private struct PopoverGate: View {
                     layout: effectiveLayout(
                         preset: bindings.current.ui.popover.preset,
                         layoutJSON: bindings.current.ui.popover.layoutJSON
-                    )
+                    ),
+                    // A4c: the ONLY site that wires the REAL quick-action
+                    // handlers (demo/preview keep the no-op defaults). A tap on
+                    // a finding "Fix" runs the action confirmed; a tap on an
+                    // "Other signals" "Ack" suppresses that alert.
+                    onRunAction: { actionID in
+                        await appDelegate.runConfirmedAction(actionID)
+                    },
+                    onAck: { alertID in
+                        await appDelegate.acknowledgeAlert(alertID)
+                    }
                 )
                     .environmentObject(bindings)
                     // Re-render the popover when the user picks a different
@@ -144,6 +154,12 @@ public final class UIState: ObservableObject {
     @Published public var activeAlerts: [Alert] = []
     @Published public var overallSeverity: Severity? = nil
     @Published public var startedAt: Date = Date()
+
+    // A4c inline quick-actions (plan D-C2): runnable actions pre-resolved per
+    // probe (keyed by probe name) off the `ActionRegistry` actor, so the
+    // popover's finding cards can decide the "Fix" button synchronously.
+    // Recomputed from the active alerts' probes on each refresh + after an ack.
+    @Published public var availableActionsByProbe: [String: [ActionDescriptor]] = [:]
 
     // Diagnosis-layer (Phase 4) verdict mirror. The proactive "is my Mac OK?"
     // aggregate, distinct from the raw `overallSeverity` (which reflects probe
@@ -750,6 +766,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // Each writes UIState off an async task, so neither blocks the UI.
         startSevenDayHistoryLoader()
         startTopNetSampler()
+
+        // A4c: resolve the per-probe runnable-action map ONCE at boot so a
+        // restart that seeded persisted alerts already offers the finding-card
+        // "Fix" button, without waiting for the first 5s refresh tick.
+        await recomputeAvailableActions()
     }
 
     /// Sample probes every 5s for popover-visible metrics (sparklines + top
@@ -1070,6 +1091,70 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
             let recent = await runner.recentAudit(20)
             uiState.recentActions = recent
         }
+
+        // A4c: keep the popover's per-probe runnable-action map current with
+        // the active alert set (periodic — the immediate paths are the alert
+        // subscription + an ack), so a finding card can decide the "Fix" button
+        // without touching the ActionRegistry actor from the view.
+        await recomputeAvailableActions()
+    }
+
+    /// A4c: pre-resolve the runnable actions for the CURRENT active alerts'
+    /// probes and publish them to `UIState.availableActionsByProbe`, so the
+    /// popover's finding cards can decide the "Fix" button synchronously. Runs
+    /// off the `ActionRegistry` actor (+ reads the live `[actions]` config); a
+    /// no-op when the action subsystem is absent (audit-log init failed). Only
+    /// probes with ≥1 eligible action are kept, so the map is empty on a clean
+    /// machine.
+    @MainActor
+    private func recomputeAvailableActions() async {
+        guard let actionRegistry = self.actionRegistry, let loader = self.loader else {
+            return
+        }
+        let floors = probeSeverityFloors(uiState.activeAlerts)
+        guard !floors.isEmpty else {
+            if !uiState.availableActionsByProbe.isEmpty {
+                uiState.availableActionsByProbe = [:]
+            }
+            return
+        }
+        let cfg = await loader.current.actions
+        var map: [String: [ActionDescriptor]] = [:]
+        for (probe, severity) in floors {
+            let descriptors = await actionRegistry.descriptorsFor(
+                probe: probe, severity: severity, config: cfg
+            )
+            if !descriptors.isEmpty { map[probe] = descriptors }
+        }
+        uiState.availableActionsByProbe = map
+    }
+
+    /// A4c CONFIRMED run from a popover "Fix" tap (plan D-L2). A direct UI tap
+    /// IS the confirmation, so run with `trigger: .confirmed` — `PolicyEngine`
+    /// bypasses the behavioural gates (enabled/power/focus/cooldown/rate) but
+    /// still enforces reversibility and audits the outcome. Reuses the EXISTING
+    /// `ActionRunner` (no new run/gate logic). Refreshes the recent-actions
+    /// mirror so the run surfaces promptly in the popover.
+    @MainActor
+    fileprivate func runConfirmedAction(_ actionID: String) async {
+        guard let runner = self.actionRunner else { return }
+        _ = await runner.run(actionID: actionID, trigger: .confirmed)
+        let recent = await runner.recentAudit(20)
+        uiState.recentActions = recent
+    }
+
+    /// A4c per-alert ACK from a popover "Ack" tap. Non-destructive UI-state
+    /// suppression via the EXISTING `StateStore` (does NOT touch the OS); hides
+    /// the alert from `activeAlerts()`/REST/MCP/popover until it escalates or
+    /// clears. Refreshes the popover's alert mirror + the action map afterwards
+    /// so the acked alert (and any Fix button its probe fed) disappears at once.
+    @MainActor
+    fileprivate func acknowledgeAlert(_ alertID: Alert.ID) async {
+        guard let store = self.stateStore else { return }
+        _ = await store.acknowledgeResult(alertID)
+        let active = await store.activeAlerts()
+        uiState.apply(activeAlerts: active)
+        await recomputeAvailableActions()
     }
 
     /// Previous ProcessSampler snapshot — kept on the actor for per-PID

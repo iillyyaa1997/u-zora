@@ -212,6 +212,51 @@ public enum PresetName: String, CaseIterable, Codable, Sendable {
     public static let `default`: PresetName = .minimal
 }
 
+// MARK: - Pure edit helpers (A3b Settings "Layout" tab)
+
+extension PopoverLayout {
+    /// Return a copy with `blocks` reordered per a SwiftUI `List.onMove`
+    /// `(IndexSet, Int)` move. Each block's visibility travels with it — only
+    /// the ORDER changes. Mirrors `Array.move(fromOffsets:toOffset:)` semantics
+    /// (`destination` is an offset into the PRE-removal array), reimplemented by
+    /// hand so this persisted model type stays Foundation-only (no SwiftUI
+    /// dependency leaks into the layout model). Pure + testable.
+    func movingBlock(from source: IndexSet, to destination: Int) -> PopoverLayout {
+        var reordered = blocks
+        let moving = source.sorted().map { reordered[$0] }
+        let removedBeforeDestination = source.filter { $0 < destination }.count
+        // Remove high→low so earlier indices stay valid during removal.
+        for index in source.sorted(by: >) {
+            reordered.remove(at: index)
+        }
+        let insertionIndex = destination - removedBeforeDestination
+        reordered.insert(contentsOf: moving, at: insertionIndex)
+        var copy = self
+        copy.blocks = reordered
+        return copy
+    }
+
+    /// Return a copy with the block matching `kind` set to `visible`. Order is
+    /// untouched; a kind not present is a no-op. Pure + testable.
+    func settingBlock(_ kind: WidgetKind, visible: Bool) -> PopoverLayout {
+        var copy = self
+        if let idx = copy.blocks.firstIndex(where: { $0.kind == kind }) {
+            copy.blocks[idx].visible = visible
+        }
+        return copy
+    }
+
+    /// Return a copy with the tile matching `kind` set to `visible`. Canonical
+    /// tile order is preserved; a kind not present is a no-op. Pure + testable.
+    func settingTile(_ kind: TileKind, visible: Bool) -> PopoverLayout {
+        var copy = self
+        if let idx = copy.tiles.firstIndex(where: { $0.kind == kind }) {
+            copy.tiles[idx].visible = visible
+        }
+        return copy
+    }
+}
+
 // MARK: - Resolution
 
 /// Resolve the effective popover layout from the persisted config values.

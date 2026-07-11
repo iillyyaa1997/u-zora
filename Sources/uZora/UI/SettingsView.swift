@@ -3,7 +3,7 @@ import AppKit
 import ServiceManagement
 @preconcurrency import UserNotifications  // see NotificationCenter.swift — cross-SDK Sendable gap
 
-/// Full Settings scene. Tabs: General / Probes / Notifications /
+/// Full Settings scene. Tabs: General / Layout / Probes / Notifications /
 /// MCP & API / Logs. Each control is two-way bound to the live
 /// `ConfigLoader.current`; writes flow back through
 /// `ConfigBindings.update`, which calls `ConfigLoader.write(...)`.
@@ -21,6 +21,10 @@ public struct SettingsView: View {
             GeneralTab(bindings: bindings)
                 .tabItem {
                     Label(String(localized: "General", defaultValue: "General"), systemImage: "gearshape")
+                }
+            LayoutTab(bindings: bindings, state: state)
+                .tabItem {
+                    Label(String(localized: "Layout", defaultValue: "Layout"), systemImage: "rectangle.3.group")
                 }
             ProbesTab(bindings: bindings)
                 .tabItem {

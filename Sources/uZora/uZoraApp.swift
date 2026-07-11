@@ -40,17 +40,36 @@ private struct PopoverGate: View {
     @ObservedObject var appDelegate: AppDelegate
     var body: some View {
         if let bindings = appDelegate.bindings {
-            PopoverView(state: appDelegate.uiState)
-                .environmentObject(bindings)
-                // Re-render the popover when the user picks a different
-                // language in Settings — bindings is an ObservableObject,
-                // so changing config.general.language re-evaluates this
-                // body and applies the new locale to all child views.
-                .environment(\.locale, resolveLocale(from: bindings.current.general.language))
+            if DemoDataSource.isEnabledInEnvironment {
+                // Opt-in live preview (UZORA_DEMO_POPOVER): drive the popover
+                // from the motion demo instead of the live pipeline. Default
+                // off ⇒ this branch is never taken and behavior is unchanged.
+                DemoPopoverHost(bindings: bindings)
+            } else {
+                PopoverView(state: appDelegate.uiState)
+                    .environmentObject(bindings)
+                    // Re-render the popover when the user picks a different
+                    // language in Settings — bindings is an ObservableObject,
+                    // so changing config.general.language re-evaluates this
+                    // body and applies the new locale to all child views.
+                    .environment(\.locale, resolveLocale(from: bindings.current.general.language))
+            }
         } else {
             ProgressView()
                 .frame(width: 200, height: 100)
         }
+    }
+}
+
+/// Opt-in demo host (`UZORA_DEMO_POPOVER`): owns a single `DemoDataSource`
+/// via `@StateObject` so its motion timer persists across popover re-renders.
+private struct DemoPopoverHost: View {
+    @StateObject private var demo = DemoDataSource()
+    let bindings: ConfigBindings
+    var body: some View {
+        PopoverView(state: demo)
+            .environmentObject(bindings)
+            .environment(\.locale, resolveLocale(from: bindings.current.general.language))
     }
 }
 

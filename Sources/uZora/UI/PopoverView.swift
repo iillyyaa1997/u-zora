@@ -9,16 +9,23 @@ import AppKit
 ///
 /// `Codable` (rawValue) so it serializes inside a `PopoverLayout` JSON string.
 /// The layout codec tolerates an unknown raw value (a block name a newer app
-/// added) by DROPPING it on decode — this enum keeps exactly the five known
-/// cases, so `allCases.count == 5` and render never has to guard an unknown.
+/// added) by DROPPING it on decode — this enum keeps exactly the seven known
+/// cases, so `allCases.count == 7` and render never has to guard an unknown.
 ///
 /// `.attention` is the unified Attention zone (A2).
+///
+/// A4b expanded catalog (opt-in, default-OFF in every preset, D4):
+/// `.sevenDayChart` is the 7-day history sparkline (CPU temperature, bucketed
+/// hourly from the durable metrics store); `.topNet` is the top-network-talkers
+/// list (per-process throughput sampled off a 60s cadence via `nettop`).
 enum WidgetKind: String, CaseIterable, Codable, Hashable, Sendable {
     case verdict
     case attention
     case systemOverview
     case topProcesses
     case recentActions
+    case sevenDayChart
+    case topNet
 }
 
 /// Live menu-bar popover. Replaces the placeholder Phase 4 dropdown
@@ -122,6 +129,10 @@ struct PopoverView<Source: PopoverDataSource>: View {
             )
         case .recentActions:
             RecentActionsBlock(entries: state.recentActions)
+        case .sevenDayChart:
+            SevenDayChartBlock(points: state.sevenDayHistory)
+        case .topNet:
+            TopNetworkBlock(rows: state.topNetProcesses)
         }
     }
 }
@@ -533,6 +544,101 @@ private func popoverByteString(_ bytes: UInt64) -> String {
         return String(format: "%.1f GB", mb / 1024)
     }
     return String(format: "%.0f MB", mb)
+}
+
+// MARK: - A4b expanded-catalog blocks (opt-in, default-OFF)
+
+/// A4b — the 7-day history sparkline (`WidgetKind.sevenDayChart`, plan D4). A
+/// bigger `Charts` line chart than a tile's mini-sparkline, showing one durable
+/// Rail-1 series (CPU temperature) bucketed to ~hourly averages by the slow
+/// loader on `AppDelegate`. Value-driven (just the bucketed points) so it
+/// renders from any `PopoverDataSource`. Body kept minimal for the cross-SDK
+/// view type-checker (the biggest timeout risk in this block).
+///
+/// Renders NOTHING (title included) until there are at least two points, so an
+/// empty / not-yet-loaded series shows no orphan header.
+private struct SevenDayChartBlock: View {
+    let points: [Double]
+
+    var body: some View {
+        if points.count > 1 {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "Last 7 days", defaultValue: "Last 7 days"))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Text(String(localized: "CPU temperature", defaultValue: "CPU temperature"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Chart {
+                    ForEach(Array(points.enumerated()), id: \.offset) { (idx, val) in
+                        LineMark(
+                            x: .value("t", idx),
+                            y: .value("v", val)
+                        )
+                        .interpolationMethod(.catmullRom)
+                    }
+                }
+                .chartXAxis(.hidden)
+                .frame(height: 80)
+                .foregroundStyle(.tint)
+            }
+        }
+    }
+}
+
+/// A4b — the top-network-talkers list (`WidgetKind.topNet`, plan D4): up to five
+/// processes by total throughput, each with a human byte-rate
+/// (down ↓ / up ↑). The rows are sampled off a 60s cadence on `AppDelegate`
+/// (nettop is an expensive subprocess), never on the 5s refresh tick.
+/// Value-driven; renders NOTHING when the list is empty (timeout / not-yet
+/// sampled), so no orphan "Network" title.
+private struct TopNetworkBlock: View {
+    let rows: [UIState.NetSnap]
+
+    var body: some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "Network", defaultValue: "Network"))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                ForEach(Array(rows.prefix(5).enumerated()), id: \.offset) { (_, r) in
+                    ProcessRow(
+                        name: r.command,
+                        value: popoverNetRateString(inPerSec: r.bytesInPerSec, outPerSec: r.bytesOutPerSec)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Human-readable byte RATE ("980 B/s", "340 KB/s", "1.2 MB/s", "2.3 GB/s"),
+/// binary units (1024). Powers the Network block. Internal (not private) so the
+/// A4b tests can assert the thresholds. Cross-SDK guard: unit constants are
+/// precomputed locals (no multi-term Double-literal chain).
+func popoverByteRateString(_ bytesPerSec: UInt64) -> String {
+    let value = Double(bytesPerSec)
+    let kb = 1024.0
+    let mb = kb * kb
+    let gb = mb * kb
+    if value >= gb {
+        return String(format: "%.1f GB/s", value / gb)
+    }
+    if value >= mb {
+        return String(format: "%.1f MB/s", value / mb)
+    }
+    if value >= kb {
+        return String(format: "%.0f KB/s", value / kb)
+    }
+    return String(format: "%.0f B/s", value)
+}
+
+/// The Network-row trailing string: "1.2 MB/s ↓ / 340 KB/s ↑" (in ↓ / out ↑).
+/// Internal so tests can assert it. Pure.
+func popoverNetRateString(inPerSec: UInt64, outPerSec: UInt64) -> String {
+    let down = popoverByteRateString(inPerSec)
+    let up = popoverByteRateString(outPerSec)
+    return "\(down) ↓ / \(up) ↑"
 }
 
 // MARK: - Leaf subviews (unchanged)

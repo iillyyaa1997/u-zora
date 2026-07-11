@@ -162,6 +162,28 @@ public final class UIState: ObservableObject {
     @Published public var topCPUProcesses: [ProcessSnap] = []
     @Published public var topMemProcesses: [ProcessSnap] = []
 
+    /// A4b top-network-talkers row (`topNet` block). Mirrors
+    /// `TopNetworkProcessProbe.ProcessEntry` but nested on UIState next to
+    /// `ProcessSnap`, so the popover surface stays self-contained.
+    public struct NetSnap: Sendable, Equatable {
+        public let pid: Int32
+        public let command: String
+        public let bytesInPerSec: UInt64
+        public let bytesOutPerSec: UInt64
+        public init(pid: Int32, command: String, bytesInPerSec: UInt64, bytesOutPerSec: UInt64) {
+            self.pid = pid
+            self.command = command
+            self.bytesInPerSec = bytesInPerSec
+            self.bytesOutPerSec = bytesOutPerSec
+        }
+    }
+    /// A4b top-network-talkers list, written by the 60s AppDelegate sampler.
+    @Published public var topNetProcesses: [NetSnap] = []
+
+    /// A4b 7-day history series (CPU temperature) bucketed to ~hourly averages,
+    /// written by the slow (~5 min) AppDelegate loader off the durable store.
+    @Published public var sevenDayHistory: [Double] = []
+
     // Mini-tile current labels.
     @Published public var cpuTempLabel: String = "—"
     @Published public var diskFreeLabel: String = "—"
@@ -310,6 +332,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
     private var metricsStore: MetricsStore?
     private var refreshTimer: Timer?
     private var metricsRetentionTask: Task<Void, Never>?
+    // A4b: two SLOW samplers, deliberately OFF the 5s main-actor refresh.
+    // `sevenDayTimer` reloads the durable 7-day series (~5 min); `topNetTimer`
+    // samples nettop (~60s, expensive subprocess). Both write UIState off async
+    // tasks so they never block the UI.
+    private var sevenDayTimer: Timer?
+    private var topNetTimer: Timer?
     // Diagnosis layer (Phase 4). All optional / nil until bootstrap wires
     // them; the cycle no-ops when the engine/watchdog are absent (e.g. no
     // MetricsStore), so it never blocks or breaks startup.
@@ -715,6 +743,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // verdict → two-track finding notifications). Dormant + no-op until a
         // store-backed engine exists; never blocks bootstrap.
         startDiagnosisLoop()
+
+        // A4b: two SLOW opt-in-block samplers, both OFF the 5s refresh tick.
+        // The 7-day loader pulls the durable CPU-temp series and buckets it
+        // hourly (~5 min cadence); the net sampler runs nettop (~60s cadence).
+        // Each writes UIState off an async task, so neither blocks the UI.
+        startSevenDayHistoryLoader()
+        startTopNetSampler()
     }
 
     /// Sample probes every 5s for popover-visible metrics (sparklines + top
@@ -751,6 +786,108 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
                 await self.runDiagnosisCycle()
             }
         }
+    }
+
+    /// A4b: is the given content block PRESENT and VISIBLE in the current
+    /// effective layout? The two slow samplers gate their expensive work on this
+    /// (D-C3.iv). `bindings == nil` (pre-bootstrap) ⇒ not visible — the blocks
+    /// are default-OFF, so this is the correct conservative default.
+    @MainActor
+    private func blockVisible(_ kind: WidgetKind) -> Bool {
+        guard let bindings else { return false }
+        return blockIsVisibleInLayout(
+            kind,
+            preset: bindings.current.ui.popover.preset,
+            layoutJSON: bindings.current.ui.popover.layoutJSON
+        )
+    }
+
+    /// A4b: reload the 7-day history series on a SLOW ~5 min cadence (NEVER on
+    /// the 5s refresh). A 7-day pull at 5s cadence is ≈120k rows, so this is far
+    /// too heavy for the visual tick. Same cross-SDK-safe loop idiom as the
+    /// other timers (a plain `Timer` whose tick spawns a `Task { @MainActor }`);
+    /// the store query itself runs off-main on the `MetricsStore` actor. Also
+    /// kicks ONE load right after launch so the block paints without a 5 min
+    /// wait. No-ops (leaves the series empty ⇒ block hides) when no store.
+    @MainActor
+    private func startSevenDayHistoryLoader() {
+        sevenDayTimer?.invalidate()
+        sevenDayTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.loadSevenDayHistory()
+            }
+        }
+        // Eager first load (off-main query) so the chart isn't blank for 5 min.
+        Task { @MainActor [weak self] in
+            await self?.loadSevenDayHistory()
+        }
+    }
+
+    /// One 7-day load: pull the durable CPU-temperature series
+    /// (`cpu_temp`/`temp_c`) for the last 7 days off the store actor, bucket it
+    /// to ~hourly averages (~168 points for a full week) in a detached task —
+    /// so the ~120k-row reduce stays off the main actor — then publish. An empty
+    /// result leaves `sevenDayHistory` empty and the block hides.
+    @MainActor
+    private func loadSevenDayHistory() async {
+        // D-C3.iv: skip the heavy 7-day query + bucketing while the block is
+        // hidden (default-OFF). Gates BOTH the eager launch load and each tick;
+        // enabling the block in Settings starts populating on the next tick.
+        guard blockVisible(.sevenDayChart) else { return }
+        guard let store = self.metricsStore else { return }
+        let now = Date()
+        let from = now.addingTimeInterval(-7 * 24 * 3600)
+        let samples = (try? await store.query(probe: "cpu_temp", from: from, to: now, name: "temp_c")) ?? []
+        // Bucket off-main: `Sample` is Sendable and `bucketHourly` is a pure
+        // nonisolated free function, so the heavy reduce never runs on the UI.
+        let bucketed = await Task.detached(priority: .utility) { bucketHourly(samples) }.value
+        uiState.sevenDayHistory = bucketed
+    }
+
+    /// A4b: sample the top-network talkers on a SLOW 60s cadence (NEVER on the
+    /// 5s refresh). `TopNetworkProcessProbe.liveSample()` runs `nettop` on a
+    /// background queue behind a checked continuation with a 3s hard timeout, so
+    /// the `await` merely suspends — the main actor is never blocked. Same
+    /// cross-SDK-safe loop idiom; an eager first sample paints the block soon
+    /// after launch.
+    @MainActor
+    private func startTopNetSampler() {
+        topNetTimer?.invalidate()
+        topNetTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.sampleTopNet()
+            }
+        }
+        Task { @MainActor [weak self] in
+            await self?.sampleTopNet()
+        }
+    }
+
+    /// One nettop sample: take the top-5 processes by total throughput and map
+    /// them to `NetSnap`. On timeout / error / no-data the sampler returns an
+    /// empty array — we KEEP the last published value (never clear on a transient
+    /// miss, never crash).
+    @MainActor
+    private func sampleTopNet() async {
+        // D-C3.iv: only spawn the expensive nettop subprocess when the Network
+        // block is actually visible (default-OFF ⇒ no extra nettop/min for a
+        // hidden block). Gates BOTH the eager sample and each tick; enabling the
+        // block in Settings starts sampling on the next 60s tick.
+        guard blockVisible(.topNet) else { return }
+        let entries = await TopNetworkProcessProbe.liveSample()
+        guard !entries.isEmpty else { return }  // keep last on timeout/error
+        let ranked = entries.sorted { $0.totalBytesPerSec > $1.totalBytesPerSec }
+        let top = ranked.prefix(5).map { entry in
+            UIState.NetSnap(
+                pid: entry.pid,
+                command: entry.command,
+                bytesInPerSec: entry.bytesInPerSec,
+                bytesOutPerSec: entry.bytesOutPerSec
+            )
+        }
+        uiState.topNetProcesses = Array(top)
     }
 
     /// One diagnosis cycle: run every detector over loaded history, diff the
@@ -980,6 +1117,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         let a = self.auditLog
         metricsRetentionTask?.cancel()
         diagnosisTimer?.invalidate()
+        sevenDayTimer?.invalidate()
+        topNetTimer?.invalidate()
         Task {
             await h?.stop()
             await r?.stop()
@@ -998,5 +1137,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         case .cleared(let id):
             return "✓ \(id) cleared"
         }
+    }
+}
+
+// MARK: - A4b: block-visibility gate (D-C3.iv)
+
+/// Whether the given content block is PRESENT and VISIBLE in the effective
+/// layout resolved from the persisted config (preset + optional customized
+/// JSON). The A4b slow samplers gate their expensive work on this so a hidden
+/// (default-OFF) block costs nothing — plan D-C3.iv: sample a widget's data only
+/// when the widget is actually used. Pure + testable; reuses the same resolver
+/// the popover renders through, so the gate can never disagree with what shows.
+func blockIsVisibleInLayout(_ kind: WidgetKind, preset: String, layoutJSON: String) -> Bool {
+    effectiveLayout(preset: preset, layoutJSON: layoutJSON)
+        .blocks.first { $0.kind == kind }?.visible == true
+}
+
+// MARK: - A4b: 7-day client-side bucketing
+
+/// Bucket a 7-day sample series into ~hourly averages (≈168 points for a full
+/// week, at ANY poll cadence). There is no server-side downsample API and a
+/// raw 7-day pull at the 5s cadence is ≈120k rows per series, so the popover
+/// buckets client-side: samples are grouped by their floor-of-hour epoch bucket
+/// and each bucket's `value`s are AVERAGED; the per-bucket averages are returned
+/// ascending in time. Empty input ⇒ empty output (the `sevenDayChart` block then
+/// hides). Pure + `nonisolated` so it can run off the main actor in a detached
+/// task. Cross-SDK guard: the bucket size is a precomputed local (no multi-term
+/// literal chain).
+func bucketHourly(_ samples: [MetricsStore.Sample]) -> [Double] {
+    if samples.isEmpty { return [] }
+    let secondsPerHour = 3600.0
+    var sums: [Int: Double] = [:]
+    var counts: [Int: Int] = [:]
+    for sample in samples {
+        let bucket = Int(sample.at.timeIntervalSince1970 / secondsPerHour)
+        sums[bucket, default: 0] += sample.value
+        counts[bucket, default: 0] += 1
+    }
+    return sums.keys.sorted().map { bucket in
+        let sum = sums[bucket] ?? 0
+        let count = counts[bucket] ?? 1
+        return sum / Double(count)
     }
 }

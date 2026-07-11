@@ -156,9 +156,14 @@ extension PopoverLayout {
         ]
     }
 
+    /// Canonical block order shared by every preset. The five original blocks
+    /// lead; the two A4b expanded-catalog blocks (`sevenDayChart`, `topNet`) are
+    /// APPENDED after `recentActions` and are opt-in — default-OFF in EVERY
+    /// preset (D4), so they show UNCHECKED in the Layout-tab list.
     private static func blocks(
         verdict: Bool, attention: Bool, systemOverview: Bool,
-        topProcesses: Bool, recentActions: Bool
+        topProcesses: Bool, recentActions: Bool,
+        sevenDayChart: Bool, topNet: Bool
     ) -> [BlockConfig] {
         [
             BlockConfig(kind: .verdict, visible: verdict),
@@ -166,6 +171,9 @@ extension PopoverLayout {
             BlockConfig(kind: .systemOverview, visible: systemOverview),
             BlockConfig(kind: .topProcesses, visible: topProcesses),
             BlockConfig(kind: .recentActions, visible: recentActions),
+            // A4b expanded catalog — opt-in, default-OFF in every preset (D4).
+            BlockConfig(kind: .sevenDayChart, visible: sevenDayChart),
+            BlockConfig(kind: .topNet, visible: topNet),
         ]
     }
 
@@ -175,7 +183,8 @@ extension PopoverLayout {
     static let minimal = PopoverLayout(
         blocks: blocks(
             verdict: true, attention: true, systemOverview: true,
-            topProcesses: false, recentActions: false
+            topProcesses: false, recentActions: false,
+            sevenDayChart: false, topNet: false
         ),
         tiles: tiles(memPressure: true, cpuTemp: true, diskFree: true, battery: false)
     )
@@ -185,7 +194,8 @@ extension PopoverLayout {
     static let balanced = PopoverLayout(
         blocks: blocks(
             verdict: true, attention: true, systemOverview: true,
-            topProcesses: true, recentActions: true
+            topProcesses: true, recentActions: true,
+            sevenDayChart: false, topNet: false
         ),
         tiles: tiles(memPressure: true, cpuTemp: true, diskFree: true, battery: true)
     )
@@ -195,7 +205,8 @@ extension PopoverLayout {
     static let diagnosis = PopoverLayout(
         blocks: blocks(
             verdict: true, attention: true, systemOverview: true,
-            topProcesses: true, recentActions: false
+            topProcesses: true, recentActions: false,
+            sevenDayChart: false, topNet: false
         ),
         tiles: tiles(memPressure: true, cpuTemp: true, diskFree: false, battery: false)
     )
@@ -204,7 +215,8 @@ extension PopoverLayout {
     static let power = PopoverLayout(
         blocks: blocks(
             verdict: true, attention: true, systemOverview: true,
-            topProcesses: true, recentActions: true
+            topProcesses: true, recentActions: true,
+            sevenDayChart: false, topNet: false
         ),
         tiles: tiles(memPressure: true, cpuTemp: true, diskFree: true, battery: true)
     )

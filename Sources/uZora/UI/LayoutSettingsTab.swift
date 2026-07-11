@@ -258,6 +258,10 @@ private func blockLabel(_ kind: WidgetKind) -> String {
         return String(localized: "Top processes", defaultValue: "Top processes")
     case .recentActions:
         return String(localized: "Recent actions", defaultValue: "Recent actions")
+    case .sevenDayChart:
+        return String(localized: "Last 7 days", defaultValue: "Last 7 days")
+    case .topNet:
+        return String(localized: "Network", defaultValue: "Network")
     }
 }
 

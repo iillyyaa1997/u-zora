@@ -22,12 +22,13 @@ struct PopoverLayoutEditTests {
     // MARK: - movingBlock
 
     @Test func movingBlockReordersAndPreservesVisibility() {
-        // minimal: [verdict✓, attention✓, systemOverview✓, topProcesses✗, recentActions✗]
+        // minimal: [verdict✓, attention✓, systemOverview✓, topProcesses✗,
+        // recentActions✗, sevenDayChart✗, topNet✗] (A4b catalog blocks appended).
         let base = PopoverLayout.minimal
         // Move the first block (verdict) down to offset 3 (SwiftUI move
         // semantics: destination is an offset into the pre-removal array).
         let moved = base.movingBlock(from: IndexSet(integer: 0), to: 3)
-        #expect(moved.blocks.map(\.kind) == [.attention, .systemOverview, .verdict, .topProcesses, .recentActions])
+        #expect(moved.blocks.map(\.kind) == [.attention, .systemOverview, .verdict, .topProcesses, .recentActions, .sevenDayChart, .topNet])
         // Visibility travels with each block — unchanged from minimal.
         #expect(blockVisible(moved, .verdict) == true)
         #expect(blockVisible(moved, .attention) == true)
@@ -41,19 +42,24 @@ struct PopoverLayoutEditTests {
 
     @Test func movingBlockUpwardMatchesArrayMoveSemantics() {
         // Move recentActions (index 4) up to offset 1 — SwiftUI move semantics.
+        // The two A4b catalog blocks (indices 5,6) stay put at the tail.
         let moved = PopoverLayout.minimal.movingBlock(from: IndexSet(integer: 4), to: 1)
-        #expect(moved.blocks.map(\.kind) == [.verdict, .recentActions, .attention, .systemOverview, .topProcesses])
+        #expect(moved.blocks.map(\.kind) == [.verdict, .recentActions, .attention, .systemOverview, .topProcesses, .sevenDayChart, .topNet])
     }
 
     @Test func movingMultipleBlocksMatchesArrayMoveSemantics() {
-        // balanced: [verdict, attention, systemOverview, topProcesses, recentActions]
-        // Move {0,1} to offset 4 ⇒ [systemOverview, topProcesses, verdict, attention, recentActions].
+        // balanced: [verdict, attention, systemOverview, topProcesses,
+        // recentActions, sevenDayChart, topNet].
+        // Move {0,1} to offset 4 ⇒ the A4b tail (indices 5,6) is undisturbed.
         let base = PopoverLayout.balanced
         let moved = base.movingBlock(from: IndexSet([0, 1]), to: 4)
-        #expect(moved.blocks.map(\.kind) == [.systemOverview, .topProcesses, .verdict, .attention, .recentActions])
-        // Still all five blocks, visibility preserved (balanced = all visible).
+        #expect(moved.blocks.map(\.kind) == [.systemOverview, .topProcesses, .verdict, .attention, .recentActions, .sevenDayChart, .topNet])
+        // Still the same set of blocks, and each block's visibility is preserved
+        // (balanced = original five visible, the two A4b catalog blocks OFF).
         #expect(Set(moved.blocks.map(\.kind)) == Set(base.blocks.map(\.kind)))
-        #expect(moved.blocks.allSatisfy { $0.visible })
+        for cfg in moved.blocks {
+            #expect(cfg.visible == base.blocks.first { $0.kind == cfg.kind }?.visible)
+        }
     }
 
     // MARK: - settingBlock / settingTile flip exactly one entry
@@ -109,7 +115,7 @@ struct PopoverLayoutEditTests {
         let back = PopoverLayout(jsonString: json)
         #expect(back == moved)
         // The NEW order specifically survives the JSON codec.
-        #expect(back?.blocks.map(\.kind) == [.attention, .systemOverview, .verdict, .topProcesses, .recentActions])
+        #expect(back?.blocks.map(\.kind) == [.attention, .systemOverview, .verdict, .topProcesses, .recentActions, .sevenDayChart, .topNet])
     }
 
     // MARK: - Toggle → persist → effectiveLayout yields the edited layout

@@ -67,6 +67,12 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     @Published var topCPUProcesses: [UIState.ProcessSnap] = []
     @Published var topMemProcesses: [UIState.ProcessSnap] = []
 
+    // A4b expanded catalog (opt-in, default-OFF) — populated so the Layout-tab
+    // demo preview shows both new blocks once enabled: a wavy 7-day series and a
+    // couple of fake network talkers.
+    @Published var sevenDayHistory: [Double] = []
+    @Published var topNetProcesses: [UIState.NetSnap] = []
+
     // Recent actions.
     @Published var recentActions: [AuditLog.Entry] = []
 
@@ -286,6 +292,24 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
         swapInHistory = swap
         kernelTaskHistory = kern
         coresPinnedHistory = cores
+
+        // A4b: a static wavy 7-day series (~168 hourly points, like the real
+        // bucketed CPU-temp series) so the `sevenDayChart` block draws a chart.
+        var week: [Double] = []
+        for i in 0..<168 {
+            week.append(wave(base: 48, amp: 11, phase: 0.4, at: i))
+        }
+        sevenDayHistory = week
+
+        // A4b: a couple of fake network talkers so the `topNet` block populates.
+        topNetProcesses = [
+            UIState.NetSnap(pid: 501, command: "Google Chrome",
+                            bytesInPerSec: 1_310_720, bytesOutPerSec: 348_160),
+            UIState.NetSnap(pid: 733, command: "com.apple.WebKit.Networking",
+                            bytesInPerSec: 262_144, bytesOutPerSec: 51_200),
+            UIState.NetSnap(pid: 902, command: "Dropbox",
+                            bytesInPerSec: 4096, bytesOutPerSec: 786_432),
+        ]
     }
 
     private func rollHistories() {

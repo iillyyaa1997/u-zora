@@ -27,7 +27,7 @@ struct PopoverRenderTests {
         // autostart:false → a fully-populated static snapshot, no live timer.
         let demo = DemoDataSource(autostart: false)
 
-        #expect(WidgetKind.allCases.count == 5)
+        #expect(WidgetKind.allCases.count == 7)
 
         // Every content block must have non-empty inputs in the initial snapshot.
         for kind in WidgetKind.allCases {
@@ -53,6 +53,11 @@ struct PopoverRenderTests {
                 #expect(!demo.topMemProcesses.isEmpty)
             case .recentActions:
                 #expect(!demo.recentActions.isEmpty)
+            case .sevenDayChart:
+                // >1 so SevenDayChartBlock draws the chart, not EmptyView.
+                #expect(demo.sevenDayHistory.count > 1)
+            case .topNet:
+                #expect(!demo.topNetProcesses.isEmpty)
             }
         }
 

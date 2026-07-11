@@ -64,6 +64,13 @@ protocol PopoverDataSource: ObservableObject {
     var topCPUProcesses: [UIState.ProcessSnap] { get }
     var topMemProcesses: [UIState.ProcessSnap] { get }
 
+    // A4b expanded catalog (opt-in, default-OFF). `sevenDayHistory` is the
+    // 7-day CPU-temperature series bucketed to ~hourly averages (the
+    // `sevenDayChart` block); `topNetProcesses` is the top-network-talkers list
+    // (the `topNet` block), sampled off a 60s cadence via nettop.
+    var sevenDayHistory: [Double] { get }
+    var topNetProcesses: [UIState.NetSnap] { get }
+
     // Recent actions.
     var recentActions: [AuditLog.Entry] { get }
 

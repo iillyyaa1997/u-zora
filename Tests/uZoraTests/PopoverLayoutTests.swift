@@ -31,6 +31,15 @@ struct PopoverLayoutTests {
         .gpuPercent, .coresPinned, .swapInRate, .kernelTask, .memoryUsedPercent,
     ]
 
+    /// The five original content blocks (visible in Balanced / Power).
+    private let originalBlocks: [WidgetKind] = [
+        .verdict, .attention, .systemOverview, .topProcesses, .recentActions,
+    ]
+
+    /// The two A4b expanded-catalog blocks — opt-in, default-OFF in EVERY
+    /// preset (D4), appended after `recentActions`.
+    private let expandedCatalogBlocks: [WidgetKind] = [.sevenDayChart, .topNet]
+
     // MARK: - JSON round-trip (encode → decode identity)
 
     @Test func jsonRoundTripIsIdentity() {
@@ -134,8 +143,11 @@ struct PopoverLayoutTests {
 
     @Test func minimalPresetMatchesDC1() {
         let m = PopoverLayout.minimal
-        // Block order + visibility.
-        #expect(m.blocks.map(\.kind) == [.verdict, .attention, .systemOverview, .topProcesses, .recentActions])
+        // Block order + visibility (A4b: the two expanded-catalog blocks are
+        // appended after recentActions, default-OFF).
+        #expect(m.blocks.map(\.kind) == [.verdict, .attention, .systemOverview, .topProcesses, .recentActions, .sevenDayChart, .topNet])
+        #expect(blockVisible(m, .sevenDayChart) == false)
+        #expect(blockVisible(m, .topNet) == false)
         #expect(blockVisible(m, .verdict) == true)
         #expect(blockVisible(m, .attention) == true)
         #expect(blockVisible(m, .systemOverview) == true)
@@ -168,8 +180,10 @@ struct PopoverLayoutTests {
 
     @Test func balancedPresetHasEveryBlockAndOriginalTileVisible() {
         let b = PopoverLayout.balanced
-        // Every block visible.
-        #expect(b.blocks.allSatisfy { $0.visible })
+        // The five original blocks are visible; the two A4b catalog blocks stay
+        // opt-in (hidden) even in Balanced.
+        for kind in originalBlocks { #expect(blockVisible(b, kind) == true) }
+        for kind in expandedCatalogBlocks { #expect(blockVisible(b, kind) == false) }
         #expect(b.blocks.count == WidgetKind.allCases.count)
         // The four original tiles are all visible; the five A4a catalog tiles
         // stay opt-in (hidden) even in Balanced.
@@ -201,7 +215,10 @@ struct PopoverLayoutTests {
 
     @Test func powerPresetHasEveryBlockAndOriginalTileVisible() {
         let p = PopoverLayout.power
-        #expect(p.blocks.allSatisfy { $0.visible })
+        // Same as Balanced: the five original blocks visible, the two A4b
+        // catalog blocks opt-in (hidden).
+        for kind in originalBlocks { #expect(blockVisible(p, kind) == true) }
+        for kind in expandedCatalogBlocks { #expect(blockVisible(p, kind) == false) }
         #expect(p.blocks.count == WidgetKind.allCases.count)
         // Same as Balanced: original four visible, A4a catalog opt-in (hidden).
         #expect(tileVisible(p, .memPressureLevel) == true)

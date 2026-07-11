@@ -101,9 +101,19 @@ struct PopoverView<Source: PopoverDataSource>: View {
                 diskFreeLabel: state.diskFreeLabel,
                 batteryLabel: state.batteryLabel,
                 memPressureLevel: state.memPressureLevel,
+                gpuLabel: state.gpuLabel,
+                coresPinnedLabel: state.coresPinnedLabel,
+                swapInLabel: state.swapInLabel,
+                kernelTaskLabel: state.kernelTaskLabel,
+                memoryUsedLabel: state.memoryLabel,
                 cpuTempHistory: state.cpuTempHistory,
                 diskFreeHistory: state.diskFreeHistory,
-                batteryHistory: state.batteryHistory
+                batteryHistory: state.batteryHistory,
+                gpuHistory: state.gpuHistory,
+                coresPinnedHistory: state.coresPinnedHistory,
+                swapInHistory: state.swapInHistory,
+                kernelTaskHistory: state.kernelTaskHistory,
+                memoryUsedHistory: state.memoryHistory
             )
         case .topProcesses:
             TopProcessesBlock(
@@ -332,9 +342,22 @@ private struct SystemOverviewBlock: View {
     let diskFreeLabel: String
     let batteryLabel: String
     let memPressureLevel: Int?
+    // A4a expanded-catalog labels (opt-in). `memoryUsedLabel` is the used%
+    // signal, wired from the source's `memoryLabel` at the call site.
+    let gpuLabel: String
+    let coresPinnedLabel: String
+    let swapInLabel: String
+    let kernelTaskLabel: String
+    let memoryUsedLabel: String
     let cpuTempHistory: [Double]
     let diskFreeHistory: [Double]
     let batteryHistory: [Double]
+    // A4a expanded-catalog sparklines. `memoryUsedHistory` = `memoryHistory`.
+    let gpuHistory: [Double]
+    let coresPinnedHistory: [Double]
+    let swapInHistory: [Double]
+    let kernelTaskHistory: [Double]
+    let memoryUsedHistory: [Double]
 
     var body: some View {
         if !tiles.isEmpty {
@@ -379,6 +402,36 @@ private struct SystemOverviewBlock: View {
             )
         case .memPressureLevel:
             MemPressureTile(level: memPressureLevel)
+        case .gpuPercent:
+            MetricTile(
+                title: String(localized: "GPU", defaultValue: "GPU"),
+                value: gpuLabel,
+                sparkline: gpuHistory
+            )
+        case .coresPinned:
+            MetricTile(
+                title: String(localized: "Cores pinned", defaultValue: "Cores pinned"),
+                value: coresPinnedLabel,
+                sparkline: coresPinnedHistory
+            )
+        case .swapInRate:
+            MetricTile(
+                title: String(localized: "Swap-in", defaultValue: "Swap-in"),
+                value: swapInLabel,
+                sparkline: swapInHistory
+            )
+        case .kernelTask:
+            MetricTile(
+                title: String(localized: "kernel_task", defaultValue: "kernel_task"),
+                value: kernelTaskLabel,
+                sparkline: kernelTaskHistory
+            )
+        case .memoryUsedPercent:
+            MetricTile(
+                title: String(localized: "Memory used", defaultValue: "Memory used"),
+                value: memoryUsedLabel,
+                sparkline: memoryUsedHistory
+            )
         }
     }
 }

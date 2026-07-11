@@ -41,6 +41,18 @@ protocol PopoverDataSource: ObservableObject {
     var batteryHistory: [Double] { get }
     var memoryHistory: [Double] { get }
 
+    // A4a expanded-catalog tiles (opt-in, default-OFF): GPU%, cores-pinned,
+    // swap-in rate, kernel_task CPU%. The memory-used% tile reuses
+    // `memoryLabel`/`memoryHistory` above, so it needs no new member.
+    var gpuLabel: String { get }
+    var coresPinnedLabel: String { get }
+    var swapInLabel: String { get }
+    var kernelTaskLabel: String { get }
+    var gpuHistory: [Double] { get }
+    var coresPinnedHistory: [Double] { get }
+    var swapInHistory: [Double] { get }
+    var kernelTaskHistory: [Double] { get }
+
     // Memory-pressure LEVEL (D6) — the CORRECT memory signal for the default
     // Memory tile (0 normal / 1 warn / 2 critical, the `mem_pressure_level`
     // ordinal from `system_signals`). `nil` until first sampled. The used%

@@ -47,6 +47,18 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     @Published var batteryHistory: [Double] = []
     @Published var memoryHistory: [Double] = []
 
+    // A4a expanded-catalog tiles (opt-in, default-OFF) — animated so the
+    // Layout-tab demo preview shows them moving once enabled. cores-pinned is
+    // an integer count that steps with the verdict cycle below.
+    @Published var gpuLabel: String = "—"
+    @Published var coresPinnedLabel: String = "—"
+    @Published var swapInLabel: String = "—"
+    @Published var kernelTaskLabel: String = "—"
+    @Published var gpuHistory: [Double] = []
+    @Published var coresPinnedHistory: [Double] = []
+    @Published var swapInHistory: [Double] = []
+    @Published var kernelTaskHistory: [Double] = []
+
     // Memory-pressure LEVEL (D6) for the default Memory tile — cycled with the
     // verdict below so the tile visibly changes color in demo mode.
     @Published var memPressureLevel: Int? = nil
@@ -72,6 +84,10 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     private let verdictCycle: [VerdictLevel] = [.good, .watch, .degraded, .problem]
     private var phaseIndex: Int = 2
     private var timer: Timer?
+
+    /// Demo cores-pinned count — stepped with the verdict cycle (calm → 1,
+    /// problem → many) so the A4a count tile visibly changes as the demo runs.
+    private var coresPinnedValue: Double = 1
 
     // MARK: - Env gate
 
@@ -139,6 +155,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
             activeAlerts = []
             overallSeverity = nil
             memPressureLevel = 0  // normal → green
+            coresPinnedValue = 1
         case .watch:
             verdictHeadline = "Memory usage is creeping up"
             findings = [
@@ -156,6 +173,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
             ]
             overallSeverity = .info
             memPressureLevel = 1  // warn → amber
+            coresPinnedValue = 2
         case .degraded:
             verdictHeadline = "Disk is filling up fast"
             findings = [
@@ -180,6 +198,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
             ]
             overallSeverity = .warn
             memPressureLevel = 1  // warn → amber
+            coresPinnedValue = 4
         case .problem:
             verdictHeadline = "A system daemon is pinning the CPU"
             findings = [
@@ -199,6 +218,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
             ]
             overallSeverity = .critical
             memPressureLevel = 2  // critical → red
+            coresPinnedValue = 8
         }
     }
 
@@ -244,16 +264,28 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
         var disk: [Double] = []
         var batt: [Double] = []
         var mem: [Double] = []
+        var gpu: [Double] = []
+        var swap: [Double] = []
+        var kern: [Double] = []
+        var cores: [Double] = []
         for i in 0..<60 {
             cpu.append(wave(base: 52, amp: 9, phase: 0.0, at: i))
             disk.append(wave(base: 40, amp: 6, phase: 1.6, at: i))
             batt.append(wave(base: 70, amp: 18, phase: 3.1, at: i))
             mem.append(wave(base: 62, amp: 15, phase: 0.8, at: i))
+            gpu.append(wave(base: 35, amp: 22, phase: 2.2, at: i))
+            swap.append(wave(base: 90, amp: 70, phase: 0.5, at: i))
+            kern.append(wave(base: 12, amp: 7, phase: 1.1, at: i))
+            cores.append(Double((i % 3) + 1))
         }
         cpuTempHistory = cpu
         diskFreeHistory = disk
         batteryHistory = batt
         memoryHistory = mem
+        gpuHistory = gpu
+        swapInHistory = swap
+        kernelTaskHistory = kern
+        coresPinnedHistory = cores
     }
 
     private func rollHistories() {
@@ -261,6 +293,10 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
         diskFreeHistory = rolled(diskFreeHistory, wave(base: 40, amp: 6, phase: 1.6, at: tick + 60))
         batteryHistory = rolled(batteryHistory, wave(base: 70, amp: 18, phase: 3.1, at: tick + 60))
         memoryHistory = rolled(memoryHistory, wave(base: 62, amp: 15, phase: 0.8, at: tick + 60))
+        gpuHistory = rolled(gpuHistory, wave(base: 35, amp: 22, phase: 2.2, at: tick + 60))
+        swapInHistory = rolled(swapInHistory, wave(base: 90, amp: 70, phase: 0.5, at: tick + 60))
+        kernelTaskHistory = rolled(kernelTaskHistory, wave(base: 12, amp: 7, phase: 1.1, at: tick + 60))
+        coresPinnedHistory = rolled(coresPinnedHistory, coresPinnedValue)
     }
 
     private func rolled(_ buffer: [Double], _ next: Double) -> [Double] {
@@ -275,6 +311,10 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
         if let d = diskFreeHistory.last { diskFreeLabel = String(format: "%.0f%%", d) }
         if let b = batteryHistory.last { batteryLabel = String(format: "%.0f%%", b) }
         if let m = memoryHistory.last { memoryLabel = String(format: "%.0f%%", m) }
+        if let g = gpuHistory.last { gpuLabel = String(format: "%.0f%%", g) }
+        if let s = swapInHistory.last { swapInLabel = String(format: "%.0f/s", s) }
+        if let k = kernelTaskHistory.last { kernelTaskLabel = String(format: "%.0f%%", k) }
+        coresPinnedLabel = String(format: "%.0f", coresPinnedValue)
         powerStateLabel = (tick % 2 == 0) ? "battery" : "ac"
     }
 

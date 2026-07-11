@@ -18,6 +18,19 @@ struct PopoverLayoutTests {
         layout.tiles.first { $0.kind == kind }?.visible
     }
 
+    /// The canonical System-overview tile order shared by every preset (A4a:
+    /// the original four, then the five expanded-catalog tiles).
+    private let canonicalTileOrder: [TileKind] = [
+        .memPressureLevel, .cpuTemp, .diskFree, .battery,
+        .gpuPercent, .coresPinned, .swapInRate, .kernelTask, .memoryUsedPercent,
+    ]
+
+    /// The five A4a expanded-catalog tiles — opt-in, default-OFF in EVERY
+    /// preset (D4).
+    private let expandedCatalogTiles: [TileKind] = [
+        .gpuPercent, .coresPinned, .swapInRate, .kernelTask, .memoryUsedPercent,
+    ]
+
     // MARK: - JSON round-trip (encode → decode identity)
 
     @Test func jsonRoundTripIsIdentity() {
@@ -47,6 +60,27 @@ struct PopoverLayoutTests {
         // Order preserved (not sorted by kind).
         #expect(back?.blocks.map(\.kind) == [.recentActions, .verdict, .systemOverview])
         #expect(back?.tiles.map(\.kind) == [.battery, .memPressureLevel])
+    }
+
+    @Test func jsonRoundTripPreservesNewCatalogTiles() {
+        // A4a: a layout that enables the new catalog tiles must survive the
+        // JSON codec verbatim (proves the new raw values encode + decode).
+        let custom = PopoverLayout(
+            blocks: [BlockConfig(kind: .systemOverview, visible: true)],
+            tiles: [
+                TileConfig(kind: .gpuPercent, visible: true),
+                TileConfig(kind: .coresPinned, visible: false),
+                TileConfig(kind: .swapInRate, visible: true),
+                TileConfig(kind: .kernelTask, visible: false),
+                TileConfig(kind: .memoryUsedPercent, visible: true),
+            ]
+        )
+        let back = PopoverLayout(jsonString: custom.toJSONString())
+        #expect(back == custom)
+        #expect(back?.tiles.map(\.kind) == [
+            .gpuPercent, .coresPinned, .swapInRate, .kernelTask, .memoryUsedPercent,
+        ])
+        #expect(back?.tiles.map(\.visible) == [true, false, true, false, true])
     }
 
     @Test func toJSONStringHasStableSortedKeyOrder() {
@@ -107,21 +141,45 @@ struct PopoverLayoutTests {
         #expect(blockVisible(m, .systemOverview) == true)
         #expect(blockVisible(m, .topProcesses) == false)
         #expect(blockVisible(m, .recentActions) == false)
-        // Tiles: mem-pressure leads; battery hidden.
-        #expect(m.tiles.map(\.kind) == [.memPressureLevel, .cpuTemp, .diskFree, .battery])
+        // Tiles: canonical order (mem-pressure leads, then the A4a catalog);
+        // battery hidden, and the five catalog tiles all hidden (default-OFF).
+        #expect(m.tiles.map(\.kind) == canonicalTileOrder)
         #expect(tileVisible(m, .memPressureLevel) == true)
         #expect(tileVisible(m, .cpuTemp) == true)
         #expect(tileVisible(m, .diskFree) == true)
         #expect(tileVisible(m, .battery) == false)
+        for kind in expandedCatalogTiles {
+            #expect(tileVisible(m, kind) == false)
+        }
     }
 
-    @Test func balancedPresetIsEverythingVisible() {
+    /// A4a: the five expanded-catalog tiles are present but default-OFF in
+    /// EVERY preset (D4) — so they show UNCHECKED in the Layout-tab checklist.
+    @Test func expandedCatalogTilesAreDefaultOffInEveryPreset() {
+        for layout in [PopoverLayout.minimal, .balanced, .diagnosis, .power] {
+            // Every preset lists all 9 tiles in the canonical order.
+            #expect(layout.tiles.map(\.kind) == canonicalTileOrder)
+            #expect(layout.tiles.count == TileKind.allCases.count)
+            for kind in expandedCatalogTiles {
+                #expect(tileVisible(layout, kind) == false)
+            }
+        }
+    }
+
+    @Test func balancedPresetHasEveryBlockAndOriginalTileVisible() {
         let b = PopoverLayout.balanced
-        let allBlocksVisible = b.blocks.allSatisfy { $0.visible }
-        let allTilesVisible = b.tiles.allSatisfy { $0.visible }
-        #expect(allBlocksVisible)
+        // Every block visible.
+        #expect(b.blocks.allSatisfy { $0.visible })
         #expect(b.blocks.count == WidgetKind.allCases.count)
-        #expect(allTilesVisible)
+        // The four original tiles are all visible; the five A4a catalog tiles
+        // stay opt-in (hidden) even in Balanced.
+        #expect(tileVisible(b, .memPressureLevel) == true)
+        #expect(tileVisible(b, .cpuTemp) == true)
+        #expect(tileVisible(b, .diskFree) == true)
+        #expect(tileVisible(b, .battery) == true)
+        for kind in expandedCatalogTiles {
+            #expect(tileVisible(b, kind) == false)
+        }
         #expect(b.tiles.count == TileKind.allCases.count)
     }
 
@@ -136,16 +194,29 @@ struct PopoverLayoutTests {
         #expect(tileVisible(d, .cpuTemp) == true)
         #expect(tileVisible(d, .diskFree) == false)
         #expect(tileVisible(d, .battery) == false)
+        for kind in expandedCatalogTiles {
+            #expect(tileVisible(d, kind) == false)
+        }
     }
 
-    @Test func powerPresetIsEverythingVisible() {
+    @Test func powerPresetHasEveryBlockAndOriginalTileVisible() {
         let p = PopoverLayout.power
-        let allBlocksVisible = p.blocks.allSatisfy { $0.visible }
-        let allTilesVisible = p.tiles.allSatisfy { $0.visible }
-        #expect(allBlocksVisible)
-        #expect(allTilesVisible)
+        #expect(p.blocks.allSatisfy { $0.visible })
         #expect(p.blocks.count == WidgetKind.allCases.count)
+        // Same as Balanced: original four visible, A4a catalog opt-in (hidden).
+        #expect(tileVisible(p, .memPressureLevel) == true)
+        #expect(tileVisible(p, .cpuTemp) == true)
+        #expect(tileVisible(p, .diskFree) == true)
+        #expect(tileVisible(p, .battery) == true)
+        for kind in expandedCatalogTiles {
+            #expect(tileVisible(p, kind) == false)
+        }
         #expect(p.tiles.count == TileKind.allCases.count)
+    }
+
+    /// A4a: the tile catalog now has exactly nine kinds.
+    @Test func tileKindCatalogHasNineKinds() {
+        #expect(TileKind.allCases.count == 9)
     }
 
     @Test func presetsByNameCoversEveryPresetName() {

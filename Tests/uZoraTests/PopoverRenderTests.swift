@@ -153,6 +153,48 @@ struct PopoverRenderTests {
         #expect(popoverUptimeLabel(since: t0, now: t0.addingTimeInterval(7200)) == "uptime 2h")
     }
 
+    // MARK: - A4a expanded-catalog tiles
+
+    /// The demo drives the five A4a catalog tiles too: labels leave "—" and the
+    /// sparklines have >1 point so `MetricTile` draws a chart, not a placeholder.
+    @Test func demoPopulatesExpandedCatalogTiles() {
+        let demo = DemoDataSource(autostart: false)
+        #expect(demo.gpuHistory.count > 1)
+        #expect(demo.swapInHistory.count > 1)
+        #expect(demo.kernelTaskHistory.count > 1)
+        #expect(demo.coresPinnedHistory.count > 1)
+        #expect(demo.gpuLabel != "—")
+        #expect(demo.swapInLabel != "—")
+        #expect(demo.kernelTaskLabel != "—")
+        #expect(demo.coresPinnedLabel != "—")
+    }
+
+    /// The four new `recordMetric` probe-strings each append to the matching
+    /// `*History` buffer AND set the `*Label`, exactly like the original tiles.
+    @Test func recordMetricDrivesExpandedCatalogFields() {
+        let state = UIState()
+
+        state.recordMetric(probe: "gpu", value: 42)
+        #expect(state.gpuLabel == "42%")
+        #expect(state.gpuHistory == [42])
+
+        state.recordMetric(probe: "cores_pinned", value: 3)
+        #expect(state.coresPinnedLabel == "3")
+        #expect(state.coresPinnedHistory == [3])
+
+        state.recordMetric(probe: "swap_in", value: 120)
+        #expect(state.swapInLabel == "120/s")
+        #expect(state.swapInHistory == [120])
+
+        state.recordMetric(probe: "kernel_task", value: 8)
+        #expect(state.kernelTaskLabel == "8%")
+        #expect(state.kernelTaskHistory == [8])
+
+        // Ring-buffer cap holds at 60 samples (parity with the original tiles).
+        for _ in 0..<70 { state.recordMetric(probe: "gpu", value: 50) }
+        #expect(state.gpuHistory.count == 60)
+    }
+
     // MARK: - Env gate defaults off
 
     @Test func demoEnvGateDefaultsOff() {

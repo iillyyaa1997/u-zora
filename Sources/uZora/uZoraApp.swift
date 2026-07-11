@@ -168,11 +168,25 @@ public final class UIState: ObservableObject {
     @Published public var batteryLabel: String = "—"
     @Published public var memoryLabel: String = "—"
 
+    // A4a expanded-catalog tile labels (opt-in, default-OFF). Each mirrors a
+    // Rail-1 series uZora already persists; populated in the refresh path from
+    // the metrics store. `memoryUsed%` reuses `memoryLabel`/`memoryHistory`.
+    @Published public var gpuLabel: String = "—"
+    @Published public var coresPinnedLabel: String = "—"
+    @Published public var swapInLabel: String = "—"
+    @Published public var kernelTaskLabel: String = "—"
+
     // Ring buffers for sparklines (last 60 samples).
     @Published public var cpuTempHistory: [Double] = []
     @Published public var diskFreeHistory: [Double] = []
     @Published public var batteryHistory: [Double] = []
     @Published public var memoryHistory: [Double] = []
+
+    // A4a expanded-catalog sparkline buffers (last 60 samples).
+    @Published public var gpuHistory: [Double] = []
+    @Published public var coresPinnedHistory: [Double] = []
+    @Published public var swapInHistory: [Double] = []
+    @Published public var kernelTaskHistory: [Double] = []
 
     // A2/D6: macOS memory-pressure LEVEL for the default Memory tile — the
     // CORRECT memory signal (0 normal / 1 warn / 2 critical), surfaced from
@@ -252,6 +266,22 @@ public final class UIState: ObservableObject {
             memoryHistory.append(value)
             if memoryHistory.count > 60 { memoryHistory.removeFirst(memoryHistory.count - 60) }
             memoryLabel = String(format: "%.0f%%", value)
+        case "gpu":
+            gpuHistory.append(value)
+            if gpuHistory.count > 60 { gpuHistory.removeFirst(gpuHistory.count - 60) }
+            gpuLabel = String(format: "%.0f%%", value)
+        case "cores_pinned":
+            coresPinnedHistory.append(value)
+            if coresPinnedHistory.count > 60 { coresPinnedHistory.removeFirst(coresPinnedHistory.count - 60) }
+            coresPinnedLabel = String(format: "%.0f", value)
+        case "swap_in":
+            swapInHistory.append(value)
+            if swapInHistory.count > 60 { swapInHistory.removeFirst(swapInHistory.count - 60) }
+            swapInLabel = String(format: "%.0f/s", value)
+        case "kernel_task":
+            kernelTaskHistory.append(value)
+            if kernelTaskHistory.count > 60 { kernelTaskHistory.removeFirst(kernelTaskHistory.count - 60) }
+            kernelTaskLabel = String(format: "%.0f%%", value)
         default:
             break
         }
@@ -776,6 +806,35 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         if !battSamples.isEmpty {
             uiState.batteryHistory = battSamples.suffix(60).map { $0.value }
             if let last = battSamples.last { uiState.batteryLabel = String(format: "%.0f%%", last.value) }
+        }
+
+        // A4a expanded catalog: hydrate the five opt-in tiles from their
+        // already-persisted Rail-1 series. `memoryUsed%` needs nothing here —
+        // it reuses the live `memoryLabel`/`memoryHistory` populated below. A
+        // series with no rows leaves the tile's "—"/placeholder (e.g. GPU on a
+        // VM, where `gpu_util_pct` is never written).
+        let gpuSamples = (try? await store.query(probe: "system_signals", from: fromTs, to: now, name: "gpu_util_pct")) ?? []
+        if !gpuSamples.isEmpty {
+            uiState.gpuHistory = gpuSamples.suffix(60).map { $0.value }
+            if let last = gpuSamples.last { uiState.gpuLabel = String(format: "%.0f%%", last.value) }
+        }
+
+        let coresSamples = (try? await store.query(probe: "system_signals", from: fromTs, to: now, name: "cores_pinned")) ?? []
+        if !coresSamples.isEmpty {
+            uiState.coresPinnedHistory = coresSamples.suffix(60).map { $0.value }
+            if let last = coresSamples.last { uiState.coresPinnedLabel = String(format: "%.0f", last.value) }
+        }
+
+        let swapSamples = (try? await store.query(probe: "system_signals", from: fromTs, to: now, name: "swapin_rate")) ?? []
+        if !swapSamples.isEmpty {
+            uiState.swapInHistory = swapSamples.suffix(60).map { $0.value }
+            if let last = swapSamples.last { uiState.swapInLabel = String(format: "%.0f/s", last.value) }
+        }
+
+        let kernelSamples = (try? await store.query(probe: "kernel_task", from: fromTs, to: now, name: "cpu_pct")) ?? []
+        if !kernelSamples.isEmpty {
+            uiState.kernelTaskHistory = kernelSamples.suffix(60).map { $0.value }
+            if let last = kernelSamples.last { uiState.kernelTaskLabel = String(format: "%.0f%%", last.value) }
         }
     }
 

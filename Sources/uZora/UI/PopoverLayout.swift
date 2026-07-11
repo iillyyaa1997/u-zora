@@ -1,18 +1,30 @@
 import Foundation
 
-/// The System-overview tiles that exist today (A3a). A4 will add more opt-in
-/// tiles; the enum is intentionally extensible and the JSON codec below
-/// tolerates an unknown tile name so a config written by a newer app doesn't
-/// crash an older one — the unknown entry is simply dropped on decode.
+/// The System-overview tiles. A3a shipped the first four; A4a adds five more
+/// opt-in "expanded catalog" tiles (all default-OFF, D4). The enum is
+/// intentionally extensible and the JSON codec below tolerates an unknown tile
+/// name so a config written by a newer app doesn't crash an older one — the
+/// unknown entry is simply dropped on decode.
 ///
 /// `cpuTemp` / `diskFree` / `battery` are sparkline `MetricTile`s;
 /// `memPressureLevel` is the mem-pressure LEVEL indicator (D6) — the CORRECT
 /// default memory signal (not used%).
+///
+/// A4a cheap-catalog tiles (opt-in, default-OFF): `gpuPercent` (GPU util %),
+/// `coresPinned` (count of pinned logical cores), `swapInRate` (swap-in
+/// pages/sec), `kernelTask` (kernel_task CPU%), `memoryUsedPercent` (the
+/// used% signal `memoryLabel`/`memoryHistory` already collect). Each surfaces
+/// a series uZora already persists — no new hardware reads.
 enum TileKind: String, CaseIterable, Codable, Hashable, Sendable {
     case cpuTemp
     case diskFree
     case battery
     case memPressureLevel
+    case gpuPercent
+    case coresPinned
+    case swapInRate
+    case kernelTask
+    case memoryUsedPercent
 }
 
 /// One top-level content block + its visibility. `kind` is always a KNOWN
@@ -123,8 +135,10 @@ struct PopoverLayout: Codable, Equatable, Sendable {
 extension PopoverLayout {
     /// Canonical System-overview tile order shared by every preset: the
     /// mem-pressure LEVEL leads (D6 — the correct default memory signal),
-    /// then CPU temp, disk free, battery. Presets differ only in which of
-    /// these are visible.
+    /// then CPU temp, disk free, battery, then the A4a expanded-catalog tiles.
+    /// Presets differ only in which of the first four are visible; the five
+    /// A4a catalog tiles are opt-in and default-OFF in EVERY preset (D4), so
+    /// they show UNCHECKED in the Layout-tab checklist and can be enabled.
     private static func tiles(
         memPressure: Bool, cpuTemp: Bool, diskFree: Bool, battery: Bool
     ) -> [TileConfig] {
@@ -133,6 +147,12 @@ extension PopoverLayout {
             TileConfig(kind: .cpuTemp, visible: cpuTemp),
             TileConfig(kind: .diskFree, visible: diskFree),
             TileConfig(kind: .battery, visible: battery),
+            // A4a expanded catalog — opt-in, default-OFF in every preset (D4).
+            TileConfig(kind: .gpuPercent, visible: false),
+            TileConfig(kind: .coresPinned, visible: false),
+            TileConfig(kind: .swapInRate, visible: false),
+            TileConfig(kind: .kernelTask, visible: false),
+            TileConfig(kind: .memoryUsedPercent, visible: false),
         ]
     }
 

@@ -272,6 +272,16 @@ private func tileLabel(_ kind: TileKind) -> String {
         return String(localized: "Disk free", defaultValue: "Disk free")
     case .battery:
         return String(localized: "Battery", defaultValue: "Battery")
+    case .gpuPercent:
+        return String(localized: "GPU", defaultValue: "GPU")
+    case .coresPinned:
+        return String(localized: "Cores pinned", defaultValue: "Cores pinned")
+    case .swapInRate:
+        return String(localized: "Swap-in", defaultValue: "Swap-in")
+    case .kernelTask:
+        return String(localized: "kernel_task", defaultValue: "kernel_task")
+    case .memoryUsedPercent:
+        return String(localized: "Memory used", defaultValue: "Memory used")
     }
 }
 

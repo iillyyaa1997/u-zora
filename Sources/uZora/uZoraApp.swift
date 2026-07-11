@@ -157,6 +157,11 @@ public final class UIState: ObservableObject {
     @Published public var batteryHistory: [Double] = []
     @Published public var memoryHistory: [Double] = []
 
+    // A2/D6: macOS memory-pressure LEVEL for the default Memory tile — the
+    // CORRECT memory signal (0 normal / 1 warn / 2 critical), surfaced from
+    // `system_signals`' `mem_pressure_level` ordinal. `nil` until first read.
+    @Published public var memPressureLevel: Int? = nil
+
     // Channel up-state indicators.
     @Published public var httpAlive: Bool = false
     @Published public var mcpAlive: Bool = false
@@ -780,12 +785,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObjec
         // sampled twice per 5s tick; a full PID walk is not free.)
         let snaps = ProcessSampler.snapshotAll()
 
-        // Memory pressure: rough — used / total %.
+        // Memory pressure: rough — used / total %. Kept for the later opt-in
+        // used% catalog tile (A4); NOT the default Memory tile anymore.
         let totalBytes = ProcessSampler.hostTotalMemoryBytes()
         if totalBytes > 0 {
             let totalRSS = snaps.reduce(UInt64(0)) { $0 + $1.residentSizeBytes }
             let pct = Double(totalRSS) / Double(totalBytes) * 100
             uiState.recordMetric(probe: "memory", value: min(pct, 100))
+        }
+
+        // A2/D6: memory-pressure LEVEL — the CORRECT memory signal for the
+        // default Memory tile (0 normal / 1 warn / 2 critical, the
+        // `mem_pressure_level` ordinal). Live-sampled like the tiles above;
+        // a `nil` read (abstain) leaves the last known level untouched.
+        if let level = SystemSignals.readMemoryPressureLevel() {
+            uiState.memPressureLevel = Int(level.ordinal)
         }
 
         // Top memory: 3 largest RSS (skip system kernel_task at PID 0).

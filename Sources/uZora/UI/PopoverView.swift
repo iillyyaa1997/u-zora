@@ -72,21 +72,22 @@ struct PopoverView<Source: PopoverDataSource>: View {
         case .verdict:
             VerdictCard(
                 tint: state.verdictTint,
-                headline: state.verdictHeadline,
-                findings: state.findings
+                headline: state.verdictHeadline
             )
         case .attention:
-            AttentionBlock(alerts: state.activeAlerts)
+            AttentionBlock(
+                findings: state.findings,
+                alerts: state.activeAlerts
+            )
         case .systemOverview:
             SystemOverviewBlock(
                 cpuTempLabel: state.cpuTempLabel,
                 diskFreeLabel: state.diskFreeLabel,
                 batteryLabel: state.batteryLabel,
-                memoryLabel: state.memoryLabel,
+                memPressureLevel: state.memPressureLevel,
                 cpuTempHistory: state.cpuTempHistory,
                 diskFreeHistory: state.diskFreeHistory,
-                batteryHistory: state.batteryHistory,
-                memoryHistory: state.memoryHistory
+                batteryHistory: state.batteryHistory
             )
         case .topProcesses:
             TopProcessesBlock(
@@ -178,35 +179,19 @@ private struct PopoverFooter: View {
 
 // MARK: - Content blocks (value-driven, selected by WidgetKind)
 
-/// Phase 4 — the proactive-diagnosis Verdict card pinned to the TOP of the
-/// popover (above the alert list; it complements, does not replace, the
-/// alerts — plan D5). One line: a colored dot by level + the headline. When
-/// there are findings, a chevron expands a per-finding drill-down (title +
-/// likely cause + suggested action). The healthy state stays compact.
+/// Phase 4 / A2 — the proactive-diagnosis Verdict card pinned to the TOP of
+/// the popover as the ONE-LINE top summary (plan D5): a colored dot by level
+/// + the headline, nothing more. The per-finding drill-down moved OUT of this
+/// card into the unified Attention zone below (findings now render in full
+/// there), so they are never shown twice and there is no chevron here. When
+/// healthy this line is the SINGLE all-clear ("All systems healthy").
 ///
-/// A1: value-driven (tint / headline / findings) instead of reading `state`
-/// directly, so it renders from any `PopoverDataSource`.
+/// Value-driven (tint / headline) so it renders from any `PopoverDataSource`.
 private struct VerdictCard: View {
     let tint: Color
     let headline: String
-    let findings: [Finding]
-    @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            summaryRow
-            if expanded && !findings.isEmpty {
-                detailList
-            }
-        }
-        .padding(8)
-        .background(tint.opacity(0.10))
-        .cornerRadius(8)
-    }
-
-    /// The always-visible one-liner: dot + headline (+ chevron when there's
-    /// something to drill into).
-    private var summaryRow: some View {
         HStack(spacing: 8) {
             Circle()
                 .fill(tint)
@@ -216,50 +201,67 @@ private struct VerdictCard: View {
                 .fontWeight(.medium)
                 .lineLimit(2)
             Spacer()
-            if !findings.isEmpty {
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if !findings.isEmpty { expanded.toggle() }
-        }
-    }
-
-    /// The drill-down: one row per finding.
-    private var detailList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(findings, id: \.id) { finding in
-                FindingDetailRow(finding: finding)
-            }
-        }
-        .padding(.top, 2)
+        .padding(8)
+        .background(tint.opacity(0.10))
+        .cornerRadius(8)
     }
 }
 
-/// The "Active alerts" block (WidgetKind `.attention`). A1 keeps the rendering
-/// byte-identical; the Attention-zone redesign is a separate later phase.
+/// The unified "Attention" zone (WidgetKind `.attention`, plan D5 + D-C3.vi).
+///
+/// Findings LEAD: each `Finding` renders in full as a cause card (title +
+/// explanation + optional suggested-action text) via `FindingDetailRow`.
+/// Below them, "Other signals" lists the raw `activeAlerts` that NO finding
+/// already explains (de-dup by `unexplainedAlerts`), so a cause isn't shown
+/// twice.
+///
+/// Absent when healthy: with no findings AND no alerts the whole zone renders
+/// `EmptyView` — this is the fix for the old DOUBLE "All systems healthy"
+/// (the Verdict card above is now the single all-clear). The zone carries NO
+/// healthy/empty-state text of its own.
 private struct AttentionBlock: View {
+    let findings: [Finding]
     let alerts: [Alert]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "Active alerts", defaultValue: "Active alerts"))
+        if attentionZoneIsVisible(findings: findings, alerts: alerts) {
+            zone
+        }
+    }
+
+    private var zone: some View {
+        let others = unexplainedAlerts(alerts, findings: findings)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(String(localized: "Attention", defaultValue: "Attention"))
                 .font(.subheadline)
                 .fontWeight(.semibold)
-            if alerts.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "sun.max.fill")
-                        .foregroundStyle(.yellow)
-                    Text(String(localized: "All systems healthy", defaultValue: "All systems healthy"))
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
+            findingsList
+            otherSignals(others)
+        }
+    }
+
+    @ViewBuilder
+    private var findingsList: some View {
+        if !findings.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(findings, id: \.id) { finding in
+                    FindingDetailRow(finding: finding)
                 }
-                .padding(.vertical, 4)
-            } else {
-                ForEach(alerts, id: \.id) { alert in
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func otherSignals(_ others: [Alert]) -> some View {
+        if !others.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "Other signals", defaultValue: "Other signals"))
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+                ForEach(others, id: \.id) { alert in
                     AlertRow(alert: alert)
                 }
             }
@@ -267,16 +269,51 @@ private struct AttentionBlock: View {
     }
 }
 
-/// System overview: a 2-column grid of four metric tiles with sparklines.
+/// Whether the unified Attention zone renders anything at all. It disappears
+/// (EmptyView) only when there are NO findings AND NO alerts — the all-clear
+/// message then lives solely in the Verdict card. Pure + testable.
+func attentionZoneIsVisible(findings: [Finding], alerts: [Alert]) -> Bool {
+    !(findings.isEmpty && alerts.isEmpty)
+}
+
+/// De-dup for the unified Attention zone (plan D-C3.vi): drop the raw alerts a
+/// finding already explains, so the same cause is not shown twice (once as a
+/// finding card, once as a raw alert under "Other signals").
+///
+/// An alert is "explained" — and hidden — ONLY on a confident, EXACT match:
+/// some finding's non-empty `subject` equals the alert's `probe` OR its `key`
+/// verbatim (whitespace-trimmed). Anything short of that — a partial/substring
+/// overlap, a case difference, an empty identifier — is treated as AMBIGUOUS
+/// and the alert is SHOWN (fail-safe: never hide a signal we're unsure about).
+func unexplainedAlerts(_ alerts: [Alert], findings: [Finding]) -> [Alert] {
+    // Confident-match keys: the non-empty finding subjects.
+    let explained = Set(
+        findings
+            .map { $0.subject.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    )
+    if explained.isEmpty { return alerts }
+    return alerts.filter { alert in
+        let probe = alert.probe.trimmingCharacters(in: .whitespaces)
+        let key = alert.key.trimmingCharacters(in: .whitespaces)
+        let isExplained = explained.contains(probe) || explained.contains(key)
+        return !isExplained
+    }
+}
+
+/// System overview: a 2-column grid of four tiles. Three are sparkline
+/// `MetricTile`s (CPU temp / Disk free / Battery); the Memory slot is the
+/// mem-pressure LEVEL indicator (D6) — the CORRECT memory signal, not used%.
+/// The used% `memoryLabel`/`memoryHistory` are kept in the data source for a
+/// later opt-in catalog tile (A4) and are simply no longer read here.
 private struct SystemOverviewBlock: View {
     let cpuTempLabel: String
     let diskFreeLabel: String
     let batteryLabel: String
-    let memoryLabel: String
+    let memPressureLevel: Int?
     let cpuTempHistory: [Double]
     let diskFreeHistory: [Double]
     let batteryHistory: [Double]
-    let memoryHistory: [Double]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -302,11 +339,7 @@ private struct SystemOverviewBlock: View {
                     value: batteryLabel,
                     sparkline: batteryHistory
                 )
-                MetricTile(
-                    title: String(localized: "Memory", defaultValue: "Memory"),
-                    value: memoryLabel,
-                    sparkline: memoryHistory
-                )
+                MemPressureTile(level: memPressureLevel)
             }
         }
     }
@@ -542,6 +575,40 @@ private struct MetricTile: View {
                     .frame(height: 20)
                     .cornerRadius(3)
             }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(8)
+    }
+}
+
+/// The default Memory tile (D6): a 3-state memory-pressure LEVEL indicator —
+/// a colored dot (green/amber/red) + a level word (normal/warn/critical) — in
+/// the Memory slot instead of a used% sparkline. Same footprint as
+/// `MetricTile` so the 2×2 grid stays even. `level` is the persisted
+/// `mem_pressure_level` ordinal (0/1/2); nil ⇒ not yet sampled (gray "—").
+private struct MemPressureTile: View {
+    let level: Int?
+
+    var body: some View {
+        let tint = memPressureColor(level)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(String(localized: "Memory", defaultValue: "Memory"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 10, height: 10)
+                Text(memPressureLabel(level))
+                    .font(.headline)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
+            Rectangle()
+                .fill(tint.opacity(0.25))
+                .frame(height: 20)
+                .cornerRadius(3)
         }
         .padding(8)
         .background(Color.secondary.opacity(0.08))

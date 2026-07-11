@@ -27,8 +27,8 @@ protocol PopoverDataSource: ObservableObject {
     var verdictHeadline: String { get }
     var findings: [Finding] { get }
 
-    // Attention zone (== the current "Active alerts" block; the redesign of
-    // this block lands in a later phase — A1 keeps the current rendering).
+    // Attention zone (A2 unified: findings lead, then unexplained raw alerts as
+    // "Other signals"; `AttentionBlock` consumes `findings` + `activeAlerts`).
     var activeAlerts: [Alert] { get }
 
     // System overview tiles.
@@ -40,6 +40,13 @@ protocol PopoverDataSource: ObservableObject {
     var diskFreeHistory: [Double] { get }
     var batteryHistory: [Double] { get }
     var memoryHistory: [Double] { get }
+
+    // Memory-pressure LEVEL (D6) — the CORRECT memory signal for the default
+    // Memory tile (0 normal / 1 warn / 2 critical, the `mem_pressure_level`
+    // ordinal from `system_signals`). `nil` until first sampled. The used%
+    // `memoryLabel`/`memoryHistory` above stay in the protocol for a later
+    // opt-in catalog tile (A4) — they are just no longer the default tile.
+    var memPressureLevel: Int? { get }
 
     // Top processes.
     var topCPUProcesses: [UIState.ProcessSnap] { get }
@@ -92,6 +99,30 @@ func popoverVerdictTint(_ verdict: VerdictLevel) -> Color {
     case .watch:    return .blue
     case .degraded: return .orange
     case .problem:  return .red
+    }
+}
+
+/// Memory-pressure LEVEL tile color (D6). The level is the persisted
+/// `mem_pressure_level` ordinal: 0 normal → green, 1 warn → orange (amber),
+/// 2+ critical → red. `nil` / unknown → gray (not yet sampled). Single source
+/// of truth reused by the tile view and asserted in tests.
+func memPressureColor(_ level: Int?) -> Color {
+    switch level {
+    case .some(0):            return .green
+    case .some(1):            return .orange
+    case .some(let l) where l >= 2: return .red
+    default:                  return .gray
+    }
+}
+
+/// Human label for the memory-pressure LEVEL ordinal (0/1/2). `nil` / unknown
+/// → em dash. Pairs with `memPressureColor`.
+func memPressureLabel(_ level: Int?) -> String {
+    switch level {
+    case .some(0):            return String(localized: "normal", defaultValue: "normal")
+    case .some(1):            return String(localized: "warn", defaultValue: "warn")
+    case .some(let l) where l >= 2: return String(localized: "critical", defaultValue: "critical")
+    default:                  return "—"
     }
 }
 

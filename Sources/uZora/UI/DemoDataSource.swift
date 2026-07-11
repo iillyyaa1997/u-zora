@@ -47,6 +47,10 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
     @Published var batteryHistory: [Double] = []
     @Published var memoryHistory: [Double] = []
 
+    // Memory-pressure LEVEL (D6) for the default Memory tile — cycled with the
+    // verdict below so the tile visibly changes color in demo mode.
+    @Published var memPressureLevel: Int? = nil
+
     // Top processes.
     @Published var topCPUProcesses: [UIState.ProcessSnap] = []
     @Published var topMemProcesses: [UIState.ProcessSnap] = []
@@ -134,6 +138,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
             findings = []
             activeAlerts = []
             overallSeverity = nil
+            memPressureLevel = 0  // normal → green
         case .watch:
             verdictHeadline = "Memory usage is creeping up"
             findings = [
@@ -150,6 +155,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
                           message: "Memory pressure elevated (demo)"),
             ]
             overallSeverity = .info
+            memPressureLevel = 1  // warn → amber
         case .degraded:
             verdictHeadline = "Disk is filling up fast"
             findings = [
@@ -173,6 +179,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
                           message: "Startup disk free space low (demo)"),
             ]
             overallSeverity = .warn
+            memPressureLevel = 1  // warn → amber
         case .problem:
             verdictHeadline = "A system daemon is pinning the CPU"
             findings = [
@@ -191,6 +198,7 @@ final class DemoDataSource: ObservableObject, PopoverDataSource {
                           message: "Startup disk free space low (demo)"),
             ]
             overallSeverity = .critical
+            memPressureLevel = 2  // critical → red
         }
     }
 
